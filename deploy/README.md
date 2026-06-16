@@ -57,6 +57,25 @@ curl -fsS http://localhost:8053/health            # liveness
 
 After editing brain code, `up -d --build` rebuilds only the cheap COPY layer.
 
+## Nightly index refresh (baked in)
+
+The HTTP service starts a daemon thread that rebuilds the index automatically — no
+host cron. It rebuilds once ~30s after boot (so a redeploy is immediately current)
+and then **daily at the configured hour**. Only notes that changed trigger a re-embed;
+the brief index file-swap is locked + atomic, so live queries never see a partial index.
+
+Env (set in the compose service):
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `TZ` | `America/New_York` | local time for the schedule |
+| `BRAIN_REFRESH_AT_HOUR` | `3` | daily rebuild hour (local) |
+| `BRAIN_REFRESH_ENABLED` | `1` | set `0` to disable the scheduler |
+| `BRAIN_REFRESH_ON_START` | `1` | one refresh shortly after boot |
+| `BRAIN_REFRESH_FORCE` | `0` | `1` = full re-embed nightly vs. rebuild-only-if-changed |
+
+Verify: `docker logs obsidian-brain-mcp | grep refresh`.
+
 ## Transports
 
 `mcp_server.py` supports both:

@@ -34,6 +34,9 @@ Local registration (stdio), e.g. in ~/.claude/settings.json:
 import json
 import os
 import sys
+import threading
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # Make sibling modules importable no matter the working directory.
@@ -193,5 +196,63 @@ def _resolve_transport() -> str:
     return os.environ.get("MCP_TRANSPORT", "stdio")
 
 
+# ── Nightly index refresh (baked into the service) ──────────────────────────
+#
+# When run as the HTTP service, a daemon thread rebuilds the index nightly so
+# new/edited notes become searchable without any external cron. The heavy work
+# (scan + embed) happens off the request path; only the brief file swap is
+# locked (see indexer.INDEX_LOCK). Controlled via env:
+#   BRAIN_REFRESH_ENABLED   (default 1)
+#   BRAIN_REFRESH_AT_HOUR   (default 3 — local hour, honors container TZ)
+#   BRAIN_REFRESH_ON_START  (default 1 — one refresh shortly after boot)
+#   BRAIN_REFRESH_FORCE     (default 0 — full re-embed vs. rebuild-if-changed)
+
+def _truthy(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _seconds_until_hour(hour: int) -> float:
+    now = datetime.now()
+    target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if target <= now:
+        target += timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def _refresh_once(force: bool) -> None:
+    try:
+        result = build_index(force=force)
+        print(f"[refresh] {datetime.now().isoformat(timespec='seconds')} {result}", flush=True)
+    except Exception as e:  # a refresh failure must never kill the thread
+        print(f"[refresh] error: {e}", flush=True)
+
+
+def _refresh_loop(hour: int, force: bool, on_start: bool) -> None:
+    if on_start:
+        time.sleep(30)  # let the server finish starting first
+        _refresh_once(force=False)  # cheap: only rebuilds if the vault changed
+    while True:
+        time.sleep(_seconds_until_hour(hour))
+        _refresh_once(force=force)
+
+
+def _maybe_start_scheduler() -> None:
+    if not _truthy("BRAIN_REFRESH_ENABLED", "1"):
+        print("[refresh] scheduler disabled", flush=True)
+        return
+    hour = int(os.environ.get("BRAIN_REFRESH_AT_HOUR", "3"))
+    force = _truthy("BRAIN_REFRESH_FORCE", "0")
+    on_start = _truthy("BRAIN_REFRESH_ON_START", "1")
+    threading.Thread(
+        target=_refresh_loop, args=(hour, force, on_start),
+        daemon=True, name="brain-refresh",
+    ).start()
+    print(f"[refresh] nightly scheduler started: daily at {hour:02d}:00 local "
+          f"(force={force}, on_start={on_start})", flush=True)
+
+
 if __name__ == "__main__":
-    mcp.run(transport=_resolve_transport())
+    transport = _resolve_transport()
+    if transport == "streamable-http":
+        _maybe_start_scheduler()
+    mcp.run(transport=transport)

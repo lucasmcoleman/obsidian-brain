@@ -6,6 +6,7 @@ import json
 import os
 import re
 import math
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,11 @@ import numpy as np
 
 from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR, INDEX_PATH, METADATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL
 from embedder import embed_texts
+
+# Serializes the brief index file read (searcher) and write (build_index) within
+# this process, so a concurrent search never sees a half-written or mismatched
+# index. The heavy work (scan + embed) runs OUTSIDE the lock.
+INDEX_LOCK = threading.RLock()
 
 
 def ensure_dirs():
@@ -142,10 +148,6 @@ def build_index(force: bool = False) -> dict[str, Any]:
     index = faiss.IndexFlatL2(dim)
     index.add(np.array(embeddings).astype("float32"))
 
-    # Save index
-    faiss.write_index(index, INDEX_PATH)
-
-    # Save metadata
     metadata = {
         "chunks": all_chunks,
         "index_mtime": max(n["mtime"] for n in notes),
@@ -153,7 +155,16 @@ def build_index(force: bool = False) -> dict[str, Any]:
         "num_chunks": len(all_chunks),
         "embedding_model": EMBEDDING_MODEL,
     }
-    Path(METADATA_PATH).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+
+    # Atomically swap in the new index + metadata under the lock so concurrent
+    # searches see either the complete old index or the complete new one.
+    with INDEX_LOCK:
+        tmp_index = INDEX_PATH + ".tmp"
+        tmp_meta = METADATA_PATH + ".tmp"
+        faiss.write_index(index, tmp_index)
+        Path(tmp_meta).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        os.replace(tmp_index, INDEX_PATH)
+        os.replace(tmp_meta, METADATA_PATH)
 
     print(f"Index saved: {INDEX_PATH}")
     return {"status": "built", "notes": len(notes), "chunks": len(all_chunks), "path": INDEX_PATH}

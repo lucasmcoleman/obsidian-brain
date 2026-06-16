@@ -13,9 +13,10 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# libgomp1 is required by the faiss-cpu wheels; curl is used by the healthcheck.
+# libgomp1: required by faiss-cpu wheels. curl: healthcheck. tzdata: lets the
+# nightly refresh honor a local TZ (set via the TZ env in compose).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libgomp1 curl \
+    && apt-get install -y --no-install-recommends libgomp1 curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 
 # Install deps first so the layer caches across code-only changes.

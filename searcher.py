@@ -2,6 +2,7 @@
 Semantic search over the Obsidian Brain index.
 """
 import json
+import math
 import os
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,7 @@ import numpy as np
 
 from config import VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K
 from embedder import embed_query
+from indexer import INDEX_LOCK
 
 
 def cosine_sim(a: list[float], b: list[float]) -> float:
@@ -21,19 +23,19 @@ def cosine_sim(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b + 1e-8)
 
 
-import math
-
-
 def search(query: str, top_k: int = TOP_K) -> list[dict]:
     """
     Search the index for notes relevant to the query.
     Returns a list of result dicts with text, note_path, and score.
     """
-    if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
-        return []
+    # Read the index + metadata together under the lock so we never load a
+    # new index against stale metadata (or a half-written file) mid-rebuild.
+    with INDEX_LOCK:
+        if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
+            return []
+        index = faiss.read_index(INDEX_PATH)
+        metadata = json.loads(Path(METADATA_PATH).read_text())
 
-    index = faiss.read_index(INDEX_PATH)
-    metadata = json.loads(Path(METADATA_PATH).read_text())
     chunks = metadata.get("chunks", [])
 
     if not chunks:
