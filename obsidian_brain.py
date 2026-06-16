@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+"""obsidian_brain — index an Obsidian vault and search it by semantic similarity.
+
+Scans a vault for Markdown notes, generates embeddings via a local LM Studio
+server (OpenAI-compatible /v1/embeddings endpoint), and stores a simple JSON
+index next to this script. A search command embeds a query and returns the most
+similar note chunks by cosine similarity.
+
+Pure standard library — no pip installs required (uses urllib + json + math).
+
+Usage:
+    python obsidian_brain.py index            # build / refresh the index
+    python obsidian_brain.py index --rebuild  # ignore cache, re-embed everything
+    python obsidian_brain.py search "your question here"
+    python obsidian_brain.py search "query" -k 10
+    python obsidian_brain.py info              # show index stats
+
+Config can be overridden via flags or the OBSIDIAN_* / LMSTUDIO_* env vars.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+# --------------------------------------------------------------------------- #
+# Configuration (overridable via env vars or CLI flags)
+# --------------------------------------------------------------------------- #
+VAULT_PATH = os.environ.get(
+    "OBSIDIAN_VAULT_PATH", "/server/obsidian"
+)
+LMSTUDIO_URL = os.environ.get("LMSTUDIO_URL", "http://192.168.0.29:1234/v1")
+EMBED_MODEL = os.environ.get("LMSTUDIO_EMBED_MODEL", "text-embedding-nomic-embed-text-v1.5")
+
+INDEX_DIR = Path(__file__).resolve().parent
+INDEX_PATH = INDEX_DIR / "vault_index.json"
+
+# Chunking: notes are split into overlapping windows so long notes are
+# retrievable by the section that actually matches the query.
+CHUNK_CHARS = int(os.environ.get("OBSIDIAN_CHUNK_CHARS", "1200"))
+CHUNK_OVERLAP = int(os.environ.get("OBSIDIAN_CHUNK_OVERLAP", "200"))
+HTTP_TIMEOUT = int(os.environ.get("LMSTUDIO_TIMEOUT", "120"))
+
+
+# --------------------------------------------------------------------------- #
+# Embedding client (LM Studio / OpenAI-compatible)
+# --------------------------------------------------------------------------- #
+def embed(texts: list[str], model: str, base_url: str) -> list[list[float]]:
+    """Return embeddings for a batch of texts via POST {base_url}/embeddings."""
+    if not texts:
+        return []
+    url = base_url.rstrip("/") + "/embeddings"
+    payload = json.dumps({"model": model, "input": texts}).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")
+        raise SystemExit(f"LM Studio HTTP {e.code} at {url}:\n{body}")
+    except urllib.error.URLError as e:
+        raise SystemExit(f"Cannot reach LM Studio at {url}: {e.reason}")
+    # Responses come back keyed by index; sort to be safe.
+    items = sorted(data["data"], key=lambda d: d.get("index", 0))
+    return [it["embedding"] for it in items]
+
+
+# --------------------------------------------------------------------------- #
+# Vault scanning & chunking
+# --------------------------------------------------------------------------- #
+def iter_markdown(vault: Path):
+    """Yield every .md file under the vault, skipping hidden dirs like .obsidian/.trash."""
+    for path in vault.rglob("*.md"):
+        if any(part.startswith(".") for part in path.relative_to(vault).parts):
+            continue
+        yield path
+
+
+def chunk_text(text: str, size: int, overlap: int) -> list[str]:
+    """Split text into overlapping character windows, preferring paragraph breaks."""
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= size:
+        return [text]
+    chunks, start, n = [], 0, len(text)
+    while start < n:
+        end = min(start + size, n)
+        # Try to break on a paragraph/sentence boundary near the window end.
+        if end < n:
+            window = text[start:end]
+            for sep in ("\n\n", "\n", ". "):
+                cut = window.rfind(sep)
+                if cut > size * 0.5:
+                    end = start + cut + len(sep)
+                    break
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Vector math (pure Python)
+# --------------------------------------------------------------------------- #
+def normalize(vec: list[float]) -> list[float]:
+    norm = math.sqrt(sum(x * x for x in vec))
+    if norm == 0:
+        return vec
+    return [x / norm for x in vec]
+
+
+def dot(a: list[float], b: list[float]) -> float:
+    return sum(x * y for x, y in zip(a, b))
+
+
+# --------------------------------------------------------------------------- #
+# Index persistence
+# --------------------------------------------------------------------------- #
+def load_index() -> dict:
+    if INDEX_PATH.exists():
+        with open(INDEX_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"model": EMBED_MODEL, "vault": VAULT_PATH, "records": []}
+
+
+def save_index(index: dict) -> None:
+    tmp = INDEX_PATH.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(index, f)
+    tmp.replace(INDEX_PATH)
+
+
+# --------------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------------- #
+def cmd_index(args) -> None:
+    vault = Path(args.vault)
+    if not vault.is_dir():
+        raise SystemExit(f"Vault not found: {vault}")
+
+    index = load_index()
+    # If model or vault changed (or --rebuild), start clean.
+    rebuild = args.rebuild or index.get("model") != args.model or index.get("vault") != str(vault)
+    cache: dict[str, dict] = {}
+    if not rebuild:
+        for rec in index.get("records", []):
+            cache.setdefault(rec["path"], {"mtime": rec["mtime"], "records": []})
+            cache[rec["path"]]["records"].append(rec)
+
+    files = sorted(iter_markdown(vault))
+    print(f"Scanning {vault} … {len(files)} markdown files found.")
+
+    records: list[dict] = []
+    pending_texts: list[str] = []   # chunk texts awaiting embedding
+    pending_meta: list[dict] = []   # parallel metadata for each pending text
+    reused = embedded_files = 0
+
+    def flush() -> None:
+        """Embed all pending chunks in one batched request."""
+        nonlocal pending_texts, pending_meta
+        if not pending_texts:
+            return
+        vectors = embed(pending_texts, args.model, args.url)
+        for meta, vec in zip(pending_meta, vectors):
+            meta = dict(meta)
+            meta["embedding"] = normalize(vec)
+            records.append(meta)
+        pending_texts, pending_meta = [], []
+
+    for path in files:
+        rel = str(path.relative_to(vault))
+        mtime = path.stat().st_mtime
+        cached = cache.get(rel)
+        if cached and abs(cached["mtime"] - mtime) < 1e-6:
+            records.extend(cached["records"])  # unchanged: reuse embeddings
+            reused += 1
+            continue
+
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            print(f"  ! skip {rel}: {e}", file=sys.stderr)
+            continue
+
+        chunks = chunk_text(text, args.chunk_chars, args.chunk_overlap)
+        for i, chunk in enumerate(chunks):
+            cid = hashlib.sha1(f"{rel}:{i}".encode()).hexdigest()[:12]
+            pending_texts.append(chunk)
+            pending_meta.append(
+                {
+                    "id": cid,
+                    "path": rel,
+                    "chunk": i,
+                    "mtime": mtime,
+                    "text": chunk,
+                }
+            )
+            if len(pending_texts) >= args.batch:
+                flush()
+        embedded_files += 1
+        if embedded_files % 25 == 0:
+            print(f"  … embedded {embedded_files} new/changed files")
+
+    flush()
+
+    out = {
+        "model": args.model,
+        "vault": str(vault),
+        "created": time.time(),
+        "records": records,
+    }
+    save_index(out)
+    print(
+        f"Done. {len(records)} chunks indexed "
+        f"({embedded_files} files embedded, {reused} reused from cache)."
+    )
+    print(f"Index written to {INDEX_PATH}")
+
+
+def search(query: str, k: int, model: str, url: str) -> list[dict]:
+    """Embed the query and return the top-k most similar chunks."""
+    index = load_index()
+    records = index.get("records", [])
+    if not records:
+        raise SystemExit("Index is empty. Run `index` first.")
+    model = index.get("model", model)  # query must use the same model as the index
+    qvec = normalize(embed([query], model, url)[0])
+    scored = [(dot(qvec, r["embedding"]), r) for r in records]
+    scored.sort(key=lambda t: t[0], reverse=True)
+    return [
+        {"score": s, "path": r["path"], "chunk": r["chunk"], "text": r["text"]}
+        for s, r in scored[:k]
+    ]
+
+
+def cmd_search(args) -> None:
+    results = search(args.query, args.k, args.model, args.url)
+    if args.json:
+        print(json.dumps(results, indent=2))
+        return
+    print(f'\nTop {len(results)} matches for: "{args.query}"\n')
+    for rank, r in enumerate(results, 1):
+        snippet = " ".join(r["text"].split())
+        if len(snippet) > 280:
+            snippet = snippet[:280] + "…"
+        print(f"{rank:>2}. [{r['score']:.3f}] {r['path']}  (chunk {r['chunk']})")
+        print(f"      {snippet}\n")
+
+
+def cmd_info(args) -> None:
+    index = load_index()
+    records = index.get("records", [])
+    paths = {r["path"] for r in records}
+    print(f"Index file : {INDEX_PATH}")
+    print(f"Exists     : {INDEX_PATH.exists()}")
+    print(f"Vault      : {index.get('vault')}")
+    print(f"Model      : {index.get('model')}")
+    print(f"Notes      : {len(paths)}")
+    print(f"Chunks     : {len(records)}")
+    if records:
+        print(f"Dimensions : {len(records[0]['embedding'])}")
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add_common(sp):
+        sp.add_argument("--url", default=LMSTUDIO_URL, help="LM Studio base URL")
+        sp.add_argument("--model", default=EMBED_MODEL, help="embedding model id")
+
+    pi = sub.add_parser("index", help="build or refresh the vault index")
+    add_common(pi)
+    pi.add_argument("--vault", default=VAULT_PATH, help="path to the Obsidian vault")
+    pi.add_argument("--rebuild", action="store_true", help="re-embed everything, ignore cache")
+    pi.add_argument("--batch", type=int, default=32, help="chunks per embedding request")
+    pi.add_argument("--chunk-chars", type=int, default=CHUNK_CHARS)
+    pi.add_argument("--chunk-overlap", type=int, default=CHUNK_OVERLAP)
+    pi.set_defaults(func=cmd_index)
+
+    ps = sub.add_parser("search", help="semantic search over the index")
+    add_common(ps)
+    ps.add_argument("query", help="natural-language query")
+    ps.add_argument("-k", type=int, default=5, help="number of results")
+    ps.add_argument("--json", action="store_true", help="output JSON")
+    ps.set_defaults(func=cmd_search)
+
+    pf = sub.add_parser("info", help="show index statistics")
+    add_common(pf)
+    pf.set_defaults(func=cmd_info)
+    return p
+
+
+def main(argv=None) -> None:
+    args = build_parser().parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
