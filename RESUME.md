@@ -15,7 +15,7 @@ A "gbrain alternative" — a persistent knowledge layer that:
 ## Architecture
 
 ```
-/workspace/research/obsidian-brain/
+/server/programming/obsidian-brain/
   config.py          — vault path, embedding model, chunk settings
   embedder.py        — LM Studio OpenAI-compatible API client
   indexer.py         — vault scanner, chunker, FAISS index builder
@@ -66,13 +66,13 @@ Skill installed at: ~/.hermes/skills/obsidian-brain/SKILL.md
 
 ```bash
 # Rebuild index
-cd /workspace/research/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python indexer.py --force
+cd /server/programming/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python indexer.py --force
 
 # Search
-cd /workspace/research/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python searcher.py "your query"
+cd /server/programming/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python searcher.py "your query"
 
 # Full consolidation (rebuild + entity enrichment)
-cd /workspace/research/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python consolidate.py --force
+cd /server/programming/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python consolidate.py --force
 ```
 
 ## Resume Steps (new sandbox)
@@ -80,7 +80,7 @@ cd /workspace/research/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian py
 1. Verify deps: `python -c "import faiss, numpy; from openai import OpenAI; print('OK')"`
 2. Verify LM Studio: `curl -s http://192.168.0.29:1234/v1/models`
 3. Verify vault: `ls /server/obsidian`
-4. Build index: `cd /workspace/research/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python indexer.py --force`
+4. Build index: `cd /server/programming/obsidian-brain && OBSIDIAN_VAULT_PATH=/server/obsidian python indexer.py --force`
 5. Test: `python searcher.py "project decisions"`
 
 ## Bugs Fixed During Setup

@@ -104,7 +104,7 @@ A cron job runs the `consolidate()` function nightly to rebuild the index. No ma
 To build or rebuild the index:
 
 ```bash
-cd /workspace/research/obsidian-brain && python indexer.py --force
+cd /server/programming/obsidian-brain && python indexer.py --force
 ```
 
 This generates embeddings via LM Studio at `http://192.168.0.29:1234/v1` using the `text-embedding-nomic-embed-text-v2-moe` model.
@@ -112,7 +112,7 @@ This generates embeddings via LM Studio at `http://192.168.0.29:1234/v1` using t
 ## Module Structure
 
 ```
-/workspace/research/obsidian-brain/
+/server/programming/obsidian-brain/
   config.py      — paths and settings
   embedder.py    — LM Studio API client
   indexer.py     — vault scanner + FAISS index builder

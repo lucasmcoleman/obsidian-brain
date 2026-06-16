@@ -7,7 +7,7 @@ The brain runs as a containerized **streamable-HTTP MCP server** so any remote a
 ## Where it runs
 
 - **Compose:** `/server/docker/compose/mcp/docker-compose.yml` (service `obsidian-brain-mcp`)
-- **Image build context:** this directory (`/workspace/research/obsidian-brain`)
+- **Image build context:** this directory (`/server/programming/obsidian-brain`)
 - **Host port:** `8053` → container `8000`
 - **Endpoint:** `http://<host>:8053/mcp` (MCP), `http://<host>:8053/health` (liveness)
 - **Network:** `backend` (external) — same as `obsidian-mcp`; reaches LM Studio on the LAN
@@ -20,7 +20,7 @@ deployment is reproducible from the repo (the compose file itself lives outside 
 ```yaml
   obsidian-brain-mcp:
     build:
-      context: /workspace/research/obsidian-brain
+      context: /server/programming/obsidian-brain
     container_name: obsidian-brain-mcp
     restart: unless-stopped
     ports:

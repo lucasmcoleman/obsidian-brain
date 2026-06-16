@@ -25,7 +25,7 @@ Local registration (stdio), e.g. in ~/.claude/settings.json:
       "mcpServers": {
         "obsidian-brain": {
           "command": "python3",
-          "args": ["/workspace/research/obsidian-brain/mcp_server.py"],
+          "args": ["/server/programming/obsidian-brain/mcp_server.py"],
           "env": {"OBSIDIAN_VAULT_PATH": "/server/obsidian"}
         }
       }

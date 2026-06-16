@@ -17,7 +17,7 @@ The vault is available via an MCP server. Add to your Claude Code MCP config (`~
   "mcpServers": {
     "obsidian-brain": {
       "command": "python3",
-      "args": ["/workspace/research/obsidian-brain/mcp_server.py"],
+      "args": ["/server/programming/obsidian-brain/mcp_server.py"],
       "env": {
         "OBSIDIAN_VAULT_PATH": "/server/obsidian"
       }
@@ -28,7 +28,7 @@ The vault is available via an MCP server. Add to your Claude Code MCP config (`~
 
 Or run directly:
 ```bash
-OBSIDIAN_VAULT_PATH=/server/obsidian python3 /workspace/research/obsidian-brain/mcp_server.py
+OBSIDIAN_VAULT_PATH=/server/obsidian python3 /server/programming/obsidian-brain/mcp_server.py
 ```
 
 For remote access (other machines), serve via SSH port forward:
