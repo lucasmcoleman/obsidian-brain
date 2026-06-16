@@ -1,129 +1,82 @@
 ---
 name: obsidian-brain
-description: "Obsidian Brain — persistent knowledge layer that reads from and writes to your Obsidian vault. No special commands required. The agent invokes this skill automatically when vault context could improve the response."
+description: "Obsidian Brain — a persistent knowledge layer over Lucas's Obsidian vault. Invoke automatically (no special commands) whenever vault context could improve an answer, or when something worth remembering emerges. Backed by an MCP server exposing semantic search + write-back."
 platforms: [linux, macos, windows]
 ---
 
 # Obsidian Brain
 
-Use this skill whenever vault context could help you answer Lucas's question or when you learn something new that belongs in his personal knowledge base. No special commands needed — just use this skill naturally.
+A gbrain-style persistent memory backed by Lucas's Obsidian vault. Use it naturally —
+there is no command to type. When a question could benefit from personal context, or
+when you learn something worth keeping, reach for the brain's MCP tools.
 
-## Vault Path
+## How it's exposed
 
-`/server/docker/docker-data/volumes/obsidian/vault`
+The brain runs as an MCP server (`obsidian-brain`) and is reached through MCP tools —
+the same tools whether you're a local agent (stdio) or a remote one (streamable-HTTP
+container at `:8053/mcp`). The vault lives at `/server/obsidian`; all brain-generated
+notes live under `_brain/` (entities in `_brain/entities/`).
 
-Set `OBSIDIAN_VAULT_PATH` in the environment before running scripts.
+## When to invoke
 
-## Brain Subdirectory
-
-All brain-generated notes live in `_brain/` under the vault root. Entity notes go in `_brain/entities/`.
-
-## When to Invoke
-
-Invoke this skill automatically when:
+Call `brain_query` automatically when:
 
 - The question mentions a person, project, client, or company
 - The question asks what Lucas decided, agreed to, or concluded
 - The question references something Lucas has been working on or discussed
 - The question asks about past notes, meetings, or conversations
-- Lucas says "remember that..." or "I decided..."
-- After a conversation where significant new information emerged about people, projects, or decisions
+- Lucas says "remember that…" or "I decided…"
 
-You do NOT need to invoke this skill for:
-- General world knowledge (geography, history, definitions)
-- Math, coding, or technical questions unrelated to Lucas's personal context
-- Questions clearly answerable from the current conversation alone
+Do NOT call it for general world knowledge, math, or coding questions unrelated to
+Lucas's personal context, or things clearly answerable from the current conversation.
 
 ## Tools
 
-### 1. Query the Brain (Context Retrieval)
+- **`brain_query(query, top_k=5)`** — semantic search over the vault. Pass the user's
+  full message. Returns ranked note excerpts. Synthesize them into your answer; don't
+  paste raw.
+- **`brain_write_entity(name, initial_content="")`** — create an entity note for a new
+  person/project/concept in `_brain/entities/`.
+- **`brain_append_insight(note_path, insight, context="")`** — append a fact/decision to
+  an existing note (`note_path` absolute or vault-relative, e.g. `Projects/Delta.md`).
+- **`brain_tasks(status="open", query="")`** — exhaustive, deterministic list of every
+  checkbox task across the vault (`open` / `done` / `all`), grouped by note. Use this —
+  not `brain_query` — for "what's open / what are my tasks" questions. `query` filters by
+  substring (e.g. a project name).
+- **`brain_complete_task(note_path, match)`** — mark an open task done in place
+  (`- [ ]` → `- [x] … ✅ <date>`). `match` must identify exactly one open task. Ask
+  first unless Lucas clearly said it's done.
+- **`brain_build_index(force=False)`** — rebuild the FAISS index after bulk note changes.
+- **`brain_status()`** — index stats, vault path, embedding model, entity + task counts.
 
-Before answering a contextual question, call the retrieval function:
+## Tasks
 
-```python
-from brain import query_brain
-context = query_brain(query, top_k=5)
-```
+Tasks are Obsidian checkboxes (`- [ ]` open, `- [x]` done) scattered across notes.
+`brain_query` (semantic) finds *relevant* notes; `brain_tasks` finds *every* task
+precisely. When Lucas asks what's on his plate, call `brain_tasks("open")`. When he says
+a task is finished, call `brain_complete_task` (confirm the exact task first if ambiguous).
 
-Use the user's full message as the query string. Then incorporate the returned context into your answer naturally — do not just dump it. Synthesize the relevant facts into your response.
+## Integrating context
 
-### 2. Record a New Entity
+1. Read the excerpts `brain_query` returns.
+2. Synthesize the relevant facts into your answer (reference the note path when helpful,
+   e.g. "Based on your notes in Project X…").
+3. Don't dump the raw block.
 
-When you learn about a new person, project, or concept that should be tracked:
+## Writing back
 
-```python
-from brain import write_entity_note
-path = write_entity_note("Entity Name", initial_content="What you know about them.")
-```
+After a substantive conversation, proactively offer to record:
 
-### 3. Append an Insight
+- **Decisions** → `brain_append_insight` on the relevant project/personal note
+- **New people/projects** → `brain_write_entity`
+- **Preferences / commitments** → `brain_append_insight` on the relevant note
 
-When you learn a new fact, decision, or conclusion after a conversation:
-
-```python
-from brain import append_insight
-result = append_insight(note_path, insight_text, context="What prompted this insight")
-```
-
-Use the absolute vault path or relative path like `Projects/Deltainitiative.md`.
-
-### 4. Rebuild the Index
-
-If the vault has changed significantly (new notes added outside this session):
-
-```python
-from brain import build_index
-result = build_index(force=True)
-```
-
-Run this before long research sessions or after bulk note changes.
-
-## How to Integrate Context
-
-When you retrieve results from `query_brain`, do not simply paste the raw context. Instead:
-
-1. Read the retrieved excerpts
-2. Synthesize the relevant facts into your answer
-3. Reference the note path if it helps ("Based on your notes in Project X...")
-
-## Writing Insights
-
-After any substantive conversation, proactively offer to record:
-- **Decisions made** → append to the relevant project/personal note
-- **New people encountered** → create an entity note in `_brain/entities/`
-- **Preferences or commitments** → append to the relevant context note
-
-Ask first before writing unless Lucas explicitly says "remember this."
-
-## Nightly Consolidation
-
-A cron job runs the `consolidate()` function nightly to rebuild the index. No manual action needed.
-
-## Running the Indexer
-
-To build or rebuild the index:
-
-```bash
-cd /workspace/research/obsidian-brain && python indexer.py --force
-```
-
-This generates embeddings via LM Studio at `http://192.168.0.29:1234/v1` using the `text-embedding-nomic-embed-text-v2-moe` model.
-
-## Module Structure
-
-```
-/workspace/research/obsidian-brain/
-  config.py      — paths and settings
-  embedder.py    — LM Studio API client
-  indexer.py     — vault scanner + FAISS index builder
-  searcher.py    — semantic search over index
-  brain.py       — orchestration + write-back
-  requirements.txt
-```
+**Ask before writing** unless Lucas explicitly says "remember this." Prefer appending to
+an existing note over creating new files.
 
 ## Pitfalls
 
-- The vault path must be accessible. If you get file-not-found errors, check that the volume mount is active.
-- Embeddings are generated locally via LM Studio. If the server is down, retrieval will fail gracefully (returns empty).
-- Do not invoke this skill for every message. Use judgment. When in doubt, ask first.
-- When appending insights, use the existing note path — do not create new files unless explicitly asked.
+- Embeddings come from LM Studio (`http://192.168.0.29:1234/v1`). If it's down, retrieval
+  fails gracefully (empty results) — say so rather than guessing.
+- Don't call `brain_query` on every message. Use judgment; when unsure, ask first.
+- The index is rebuilt nightly by a consolidation job — no manual action needed normally.

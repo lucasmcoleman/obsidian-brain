@@ -2,28 +2,31 @@
 """
 Obsidian Brain MCP Server.
 
-Exposes brain functions as stdio MCP tools for external agent integration.
-Compatible with Claude Code MCP, Copilot Coworker, and any MCP client.
+Exposes the brain as MCP tools over either stdio (local agents such as Claude
+Code / Copilot Coworker) or streamable-HTTP (containerized / remote agents).
+Tool names and behavior are identical across transports.
 
 Usage:
-    python mcp_server.py
+    python mcp_server.py                 # stdio (default)
+    python mcp_server.py --http          # streamable-HTTP on 0.0.0.0:8000/mcp
+    MCP_TRANSPORT=streamable-http python mcp_server.py
 
 Environment:
-    OBSIDIAN_VAULT_PATH   — path to Obsidian vault (required)
-    OBSIDIAN_BRAIN_DIR    — path to _brain dir (default: {vault}/_brain)
-    LM_BASE_URL           — LM Studio URL (default: http://192.168.0.29:1234/v1)
+    OBSIDIAN_VAULT_PATH   path to the Obsidian vault (default /server/obsidian)
+    LM_BASE_URL           LM Studio URL (default http://192.168.0.29:1234/v1)
+    EMBEDDING_MODEL       embedding model id
+    MCP_TRANSPORT         stdio | streamable-http   (default stdio)
+    MCP_HOST              bind host for HTTP         (default 0.0.0.0)
+    MCP_PORT              bind port for HTTP         (default 8000)
+    MCP_PATH              streamable-HTTP path       (default /mcp)
 
-Install / Register:
-    Add to your MCP config (~/.claude/settings.json or Claude Code MCP config):
-
+Local registration (stdio), e.g. in ~/.claude/settings.json:
     {
       "mcpServers": {
         "obsidian-brain": {
           "command": "python3",
           "args": ["/workspace/research/obsidian-brain/mcp_server.py"],
-          "env": {
-            "OBSIDIAN_VAULT_PATH": "/server/obsidian"
-          }
+          "env": {"OBSIDIAN_VAULT_PATH": "/server/obsidian"}
         }
       }
     }
@@ -33,250 +36,162 @@ import os
 import sys
 from pathlib import Path
 
-# Add project dir to path
+# Make sibling modules importable no matter the working directory.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from mcp.server import Server
-from mcp.types import Tool, TextContent
-from mcp.server.stdio import stdio_server
+from mcp.server.fastmcp import FastMCP
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from brain import (
     query_brain,
     write_entity_note,
     append_insight,
     build_index,
-    consolidate,
-    get_or_build_index,
+)
+from tasks import scan_tasks, complete_task, count_tasks, format_tasks
+from config import (
+    VAULT_PATH,
+    INDEX_PATH,
+    METADATA_PATH,
+    ENTITIES_DIR,
+    EMBEDDING_MODEL,
+    LM_BASE_URL,
 )
 
-# ── Config ────────────────────────────────────────────────────────────────────────
-
-VAULT_PATH = os.environ.get(
-    "OBSIDIAN_VAULT_PATH",
-    "/server/obsidian"
-)
-LM_BASE_URL = os.environ.get(
-    "LM_BASE_URL",
-    "http://192.168.0.29:1234/v1"
-)
-EMBEDDING_MODEL = os.environ.get(
-    "EMBEDDING_MODEL",
-    "text-embedding-nomic-embed-text-v2-moe"
+mcp = FastMCP(
+    "obsidian-brain",
+    host=os.environ.get("MCP_HOST", "0.0.0.0"),
+    port=int(os.environ.get("MCP_PORT", "8000")),
+    streamable_http_path=os.environ.get("MCP_PATH", "/mcp"),
 )
 
-# ── Server Setup ────────────────────────────────────────────────────────────────
 
-server = Server("obsidian-brain")
+@mcp.tool()
+def brain_query(query: str, top_k: int = 5) -> str:
+    """Query the Obsidian vault for contextually relevant notes.
 
-
-# ── Tools ────────────────────────────────────────────────────────────────────────
-
-@server.list_tools()
-async def list_tools() -> list[Tool]:
-    """Expose all brain functions as MCP tools."""
-    return [
-        Tool(
-            name="brain_query",
-            description=(
-                "Query the Obsidian vault for contextually relevant notes. "
-                "Call this before answering questions about people, projects, "
-                "decisions, or past conversations."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language query string.",
-                    },
-                    "top_k": {
-                        "type": "integer",
-                        "description": "Max number of results to return (default: 5).",
-                        "default": 5,
-                    },
-                },
-                "required": ["query"],
-            },
-        ),
-        Tool(
-            name="brain_write_entity",
-            description=(
-                "Create a new entity note in _brain/entities/ for a person, "
-                "project, or concept. Use this when you encounter something new "
-                "worth tracking persistently."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Entity name (e.g. 'Sarah Chen' or 'Delta Heartland Project').",
-                    },
-                    "initial_content": {
-                        "type": "string",
-                        "description": "Initial notes about the entity.",
-                    },
-                },
-                "required": ["name"],
-            },
-        ),
-        Tool(
-            name="brain_append_insight",
-            description=(
-                "Append a new insight, decision, or fact to an existing vault note. "
-                "Use this after a conversation where you learn something new about "
-                "a person, project, or decision."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "note_path": {
-                        "type": "string",
-                        "description": (
-                            "Absolute path to the note, or relative to the vault. "
-                            "Example: 'Projects/Delta Heartland.md' or "
-                            "'/server/obsidian/Projects/Delta Heartland.md'"
-                        ),
-                    },
-                    "insight": {
-                        "type": "string",
-                        "description": "The new fact, decision, or conclusion to record.",
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": "Optional context about what prompted this insight.",
-                    },
-                },
-                "required": ["note_path", "insight"],
-            },
-        ),
-        Tool(
-            name="brain_build_index",
-            description=(
-                "Rebuild the FAISS index from the current vault state. "
-                "Use this if new notes have been added externally and the index is stale."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "force": {
-                        "type": "boolean",
-                        "description": "Force full rebuild even if index appears current (default: False).",
-                        "default": False,
-                    },
-                },
-            },
-        ),
-        Tool(
-            name="brain_status",
-            description=(
-                "Get the current state of the brain: index stats, vault path, "
-                "last index mtime, and entity count."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-    ]
+    Call this before answering questions about people, projects, clients,
+    decisions, or past conversations. Pass the user's full natural-language
+    message as `query`. `top_k` caps the number of distinct notes returned
+    (default 5). Returns a formatted context block of the most relevant note
+    excerpts; synthesize them into your answer rather than pasting them raw.
+    """
+    return query_brain(query, top_k=top_k)
 
 
-@server.call_tool()
-async def call_tool(
-    name: str,
-    arguments: dict,
-) -> list[TextContent]:
-    """Handle tool calls."""
-    vault = VAULT_PATH
+@mcp.tool()
+def brain_write_entity(name: str, initial_content: str = "") -> str:
+    """Create a new entity note in _brain/entities/ for a person, project, or concept.
 
-    if name == "brain_query":
-        query = arguments["query"]
-        top_k = arguments.get("top_k", 5)
-        context = query_brain(query, top_k=top_k)
-        return [TextContent(type="text", text=context)]
+    Use when you encounter something new worth tracking persistently. Returns the
+    path to the created (or already-existing) note. Confirm with the user before
+    writing unless they explicitly said to remember it.
+    """
+    return write_entity_note(entity_name=name, initial_content=initial_content)
 
-    elif name == "brain_write_entity":
-        path = write_entity_note(
-            entity_name=arguments["name"],
-            initial_content=arguments.get("initial_content", ""),
-        )
-        return [TextContent(
-            type="text",
-            text=f"Entity note created: {path}",
-        )]
 
-    elif name == "brain_append_insight":
-        result = append_insight(
-            note_path=arguments["note_path"],
-            insight=arguments["insight"],
-            context=arguments.get("context", ""),
-        )
-        return [TextContent(type="text", text=result)]
+@mcp.tool()
+def brain_append_insight(note_path: str, insight: str, context: str = "") -> str:
+    """Append a new insight, decision, or fact to an existing vault note.
 
-    elif name == "brain_build_index":
-        force = arguments.get("force", False)
-        result = build_index(force=force)
-        return [TextContent(
-            type="text",
-            text=json.dumps(result, indent=2),
-        )]
+    `note_path` may be absolute or relative to the vault (e.g. 'Projects/Delta.md').
+    Use after a conversation where you learn something new about a person, project,
+    or decision. `context` optionally records what prompted the insight. Confirm
+    with the user before writing unless they explicitly said to remember it.
+    """
+    return append_insight(note_path=note_path, insight=insight, context=context)
 
-    elif name == "brain_status":
-        from config import BRAIN_DIR, INDEX_PATH, METADATA_PATH, EMBEDDING_MODEL
-        import json as _json
 
-        status = {
-            "vault_path": vault,
-            "embedding_model": EMBEDDING_MODEL,
-            "lm_base_url": LM_BASE_URL,
-        }
+@mcp.tool()
+def brain_tasks(status: str = "open", query: str = "") -> str:
+    """List checkbox tasks across the whole vault — exhaustive and deterministic.
 
-        if os.path.exists(METADATA_PATH):
-            meta = _json.loads(Path(METADATA_PATH).read_text())
-            status.update({
-                "notes_indexed": meta.get("num_notes", "unknown"),
-                "chunks": meta.get("num_chunks", "unknown"),
-                "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
-                "index_mtime": meta.get("index_mtime", "unknown"),
-            })
-        else:
-            status["notes_indexed"] = "no index"
+    Use this (not brain_query) for "what are my open tasks" style questions, where
+    you need every task, not just semantically-similar notes. `status` is 'open',
+    'done', or 'all'. Optional `query` filters to tasks whose text or note path
+    contains that substring (e.g. a project name). Results are grouped by note.
+    """
+    tasks = scan_tasks(status=status)
+    if query:
+        q = query.lower()
+        tasks = [t for t in tasks if q in t["text"].lower() or q in t["note_path"].lower()]
+    return format_tasks(tasks, status)
 
-        if os.path.exists(INDEX_PATH):
-            import faiss
-            idx = faiss.read_index(INDEX_PATH)
-            status["index_vector_count"] = idx.ntotal
-        else:
-            status["index_vector_count"] = "no index"
 
-        entity_dir = os.path.join(vault, "_brain", "entities")
-        if os.path.exists(entity_dir):
-            status["entity_count"] = len([
-                f for f in os.listdir(entity_dir)
-                if f.endswith(".md")
-            ])
-        else:
-            status["entity_count"] = 0
+@mcp.tool()
+def brain_complete_task(note_path: str, match: str) -> str:
+    """Mark an open task complete in place: flips '- [ ]' to '- [x] … ✅ <date>'.
 
-        return [TextContent(
-            type="text",
-            text=json.dumps(status, indent=2),
-        )]
+    `note_path` is absolute or vault-relative. `match` is a substring identifying
+    the open task; it must match exactly one open task in that note (otherwise the
+    call returns an error/ambiguous result and writes nothing). Confirm with the
+    user before completing unless they clearly said the task is done.
+    """
+    return json.dumps(complete_task(note_path=note_path, match=match), indent=2)
 
+
+@mcp.tool()
+def brain_build_index(force: bool = False) -> str:
+    """Rebuild the FAISS index from the current vault state.
+
+    Use if notes were added or changed externally and the index is stale. Set
+    `force=True` to rebuild unconditionally. Returns a JSON summary of the build.
+    """
+    return json.dumps(build_index(force=force), indent=2)
+
+
+@mcp.tool()
+def brain_status() -> str:
+    """Report brain state: vault path, embedding model, index stats, entity count."""
+    status: dict = {
+        "vault_path": VAULT_PATH,
+        "embedding_model": EMBEDDING_MODEL,
+        "lm_base_url": LM_BASE_URL,
+    }
+
+    if os.path.exists(METADATA_PATH):
+        meta = json.loads(Path(METADATA_PATH).read_text())
+        status.update({
+            "notes_indexed": meta.get("num_notes", "unknown"),
+            "chunks": meta.get("num_chunks", "unknown"),
+            "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
+            "index_mtime": meta.get("index_mtime", "unknown"),
+        })
     else:
-        return [TextContent(
-            type="text",
-            text=f"Unknown tool: {name}",
-        )]
+        status["notes_indexed"] = "no index"
+
+    if os.path.exists(INDEX_PATH):
+        import faiss
+        status["index_vector_count"] = faiss.read_index(INDEX_PATH).ntotal
+    else:
+        status["index_vector_count"] = "no index"
+
+    if os.path.isdir(ENTITIES_DIR):
+        status["entity_count"] = len(
+            [f for f in os.listdir(ENTITIES_DIR) if f.endswith(".md")]
+        )
+    else:
+        status["entity_count"] = 0
+
+    status["tasks"] = count_tasks()
+
+    return json.dumps(status, indent=2)
 
 
-# ── Entry Point ──────────────────────────────────────────────────────────────
+@mcp.custom_route("/health", methods=["GET"])
+async def health(_request: Request) -> JSONResponse:
+    """Lightweight liveness probe for container healthchecks / load balancers."""
+    return JSONResponse({"status": "ok", "service": "obsidian-brain"})
 
-async def main():
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(read_stream, write_stream, server.create_initialization_options())
+
+def _resolve_transport() -> str:
+    if "--http" in sys.argv:
+        return "streamable-http"
+    if "--stdio" in sys.argv:
+        return "stdio"
+    return os.environ.get("MCP_TRANSPORT", "stdio")
 
 
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(main())
+    mcp.run(transport=_resolve_transport())

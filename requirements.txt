@@ -2,3 +2,5 @@ faiss-cpu
 numpy
 openai
 requests
+mcp>=1.26.0
+uvicorn
