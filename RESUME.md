@@ -22,7 +22,9 @@ A "gbrain alternative" — a persistent knowledge layer that:
   searcher.py        — semantic search with cosine re-ranking
   brain.py           — orchestration: retrieval + write-back to vault
   consolidate.py     — standalone nightly consolidation script
-  obsidian-brain.md  — skill documentation
+  mcp_server.py      — stdio MCP server for external agents (Copilot Coworker, etc.)
+  CLAUDE.md          — Claude Code / OpenClaw skill file
+  obsidian-brain.md  — Hermes skill documentation
   requirements.txt   — faiss-cpu, numpy, openai, requests
   RESUME.md          — this file
 
