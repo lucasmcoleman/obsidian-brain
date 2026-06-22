@@ -33,6 +33,7 @@ Local registration (stdio), e.g. in ~/.claude/settings.json:
 """
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -227,13 +228,57 @@ def _refresh_once(force: bool) -> None:
         print(f"[refresh] error: {e}", flush=True)
 
 
+def _run_script(script: str, argv: list, label: str) -> None:
+    """Run a bundled maintenance script as a subprocess; never raise."""
+    try:
+        proc = subprocess.run(
+            [sys.executable, os.path.join(os.path.dirname(__file__), script), *argv],
+            capture_output=True, text=True, timeout=3600,
+        )
+        tail = "\n".join((proc.stdout or "").strip().splitlines()[-4:])
+        print(f"[{label}] exit={proc.returncode}\n{tail}", flush=True)
+        if proc.returncode != 0 and proc.stderr:
+            print(f"[{label}] stderr: {proc.stderr.strip()[-800:]}", flush=True)
+    except Exception as e:
+        print(f"[{label}] error: {e}", flush=True)
+
+
+def _post_refresh_tasks() -> None:
+    """After the index refresh: re-link MOCs/Related + frontmatter, then update the
+    Open Action Items ledger. Each step is env-toggled and isolated so any failure
+    just logs and never kills the scheduler thread.
+
+    Endpoints default to LM_BASE_URL so a fresh clone with a single LLM endpoint
+    works out of the box; this deployment overrides the chat URL to llama-swap.
+    """
+    vault = os.environ.get("OBSIDIAN_VAULT_PATH", "/vault")
+    lm = os.environ.get("LM_BASE_URL", "http://localhost:1234/v1")
+    chat_url = os.environ.get("LINKER_CHAT_URL", lm)
+    chat_model = os.environ.get("LINKER_CHAT_MODEL", "qwen3.6-35b-a3b-mtp")
+    embed_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v2-moe")
+
+    if _truthy("BRAIN_LINKER_ENABLED", "1"):
+        _run_script("moc_linker.py", [
+            "--apply", "--tag-notes", "--related", "--vault", vault,
+            "--endpoint", chat_url, "--model", chat_model,
+            "--embed-endpoint", lm, "--embed-model", embed_model,
+        ], "linker")
+    if _truthy("BRAIN_LEDGER_ENABLED", "1"):
+        _run_script("ledger_update.py", [
+            "--apply", "--vault", vault, "--endpoint", chat_url, "--model", chat_model,
+        ], "ledger")
+
+
 def _refresh_loop(hour: int, force: bool, on_start: bool) -> None:
     if on_start:
         time.sleep(30)  # let the server finish starting first
         _refresh_once(force=False)  # cheap: only rebuilds if the vault changed
+        if _truthy("BRAIN_POSTREFRESH_ON_START", "0"):
+            _post_refresh_tasks()  # heavy (~minutes); off by default, on for the nightly run
     while True:
         time.sleep(_seconds_until_hour(hour))
         _refresh_once(force=force)
+        _post_refresh_tasks()
 
 
 def _maybe_start_scheduler() -> None:
