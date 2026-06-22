@@ -68,6 +68,15 @@ mcp = FastMCP(
     host=os.environ.get("MCP_HOST", "0.0.0.0"),
     port=int(os.environ.get("MCP_PORT", "8000")),
     streamable_http_path=os.environ.get("MCP_PATH", "/mcp"),
+    # Stateless streamable-HTTP: every request is self-contained, so there is no
+    # server-side session ID that can expire/recycle out from under a long-lived
+    # client. This eliminates the keepalive churn where the client's periodic
+    # list_tools hit a stale session and got "Session terminated"/404, forcing a
+    # reconnect. All tools here are plain request/response (no server-initiated
+    # streaming), so stateless mode is a clean fit. Override with
+    # BRAIN_STATELESS_HTTP=0 if a future feature needs sticky sessions.
+    stateless_http=os.environ.get("BRAIN_STATELESS_HTTP", "1").strip().lower()
+    in ("1", "true", "yes", "on"),
 )
 
 
