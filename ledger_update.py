@@ -91,6 +91,29 @@ def list_open_items(text: str) -> list[tuple[int, str]]:
     return items
 
 
+def list_auto_item_texts(auto_block: str) -> list[str]:
+    """Return the plain action texts already tracked in the managed auto block.
+
+    Strips the leading checkbox marker and the trailing ``_category_ (source: ...)``
+    metadata so the model sees just the action, e.g.
+    'Draft AI PII incident response playbook'. Used to tell the model what's
+    already tracked so it stops re-surfacing paraphrases of the same item.
+    """
+    texts: list[str] = []
+    for line in auto_block.splitlines():
+        m = re.match(r"^\s*[-*+]\s+\[[ xX]\]\s+(.*\S)\s*$", line)
+        if not m:
+            continue
+        t = m.group(1)
+        # Drop the trailing metadata we render: "  _cat_  (source: file.md)"
+        t = re.sub(r"\s*_[^_]+_\s*(\(source:[^)]*\))?\s*$", "", t)
+        t = re.sub(r"\s*\(source:[^)]*\)\s*$", "", t)
+        t = t.strip()
+        if t:
+            texts.append(t)
+    return texts
+
+
 def gather_recent_notes(vault: Path, recent_days: int, now: datetime) -> list[dict]:
     cutoff = (now - timedelta(days=recent_days)).timestamp()
     notes = []
@@ -118,24 +141,34 @@ def build_context(notes: list[dict]) -> str:
     return "\n".join(out)
 
 
-def ask_model(open_items: list[tuple[int, str]], context: str, endpoint: str, model: str,
-              timeout: int, retries: int) -> dict:
+def ask_model(open_items: list[tuple[int, str]], already_tracked: list[str], context: str,
+              endpoint: str, model: str, timeout: int, retries: int) -> dict:
     numbered = "\n".join(f"{k}. {txt}" for k, (_, txt) in enumerate(open_items, 1))
+    tracked = "\n".join(f"- {t}" for t in already_tracked) or "(none yet)"
     system = (
         "You maintain a personal action-item ledger. You are given the current OPEN "
-        "items and the text of recently-edited notes. Be conservative and precise. "
+        "items, the items ALREADY TRACKED in the auto-detected block, and the text of "
+        "recently-edited notes. Be conservative and precise. "
         "Respond with ONLY a compact JSON object."
     )
     user = (
         f"OPEN ITEMS (numbered):\n{numbered}\n\n"
+        f"ALREADY TRACKED — do not re-add these, including paraphrases or "
+        f"semantically equivalent items (same underlying task, even if worded "
+        f"differently, scoped differently, or with a different category):\n{tracked}\n\n"
         f"RECENT NOTES:\n{context}\n\n"
         "Return JSON with two keys:\n"
         '  "completed": array of {"n": <open-item number>, "evidence": "<short quote/why>"} '
-        "— ONLY for items the notes clearly show are DONE. Omit if unsure.\n"
+        "— include an OPEN item ONLY when a recent note states explicitly that it was "
+        "done, sent, finished, completed, submitted, or otherwise resolved (e.g. \"sent "
+        "the cohort 2 email\", \"governance doc is now live\"). Quote the proving phrase "
+        "in \"evidence\". If a note merely discusses, plans, or makes progress on an item "
+        "without stating it is finished, do NOT mark it completed. When unsure, omit it.\n"
         '  "new_items": array of {"text": "<concise action assigned to the note-taker>", '
         '"category": "<short group>", "source": "<note filename>"} '
-        "— action items in the notes that are NOT already an open item above. "
-        "Do not duplicate existing items. Omit anything already listed.\n"
+        "— action items in the notes that are NOT already an OPEN item above AND NOT in "
+        "the ALREADY TRACKED list (in any wording). Omit anything that restates an "
+        "existing or already-tracked item.\n"
         "If none, use empty arrays. /no_think"
     )
     payload = {"model": model, "messages": [
@@ -213,16 +246,18 @@ def main() -> int:
     body_no_auto = strip_auto_block(body)
     existing_auto = body[len(body_no_auto):] if AUTO_BEGIN in body else ""
     open_items = list_open_items(body_no_auto)
+    already_tracked = list_auto_item_texts(existing_auto)
     recent = gather_recent_notes(vault, args.recent_days, now)
     print(f"Ledger: {ledger}")
-    print(f"Open items: {len(open_items)} | recent notes (<= {args.recent_days}d): {len(recent)}")
+    print(f"Open items: {len(open_items)} | already-tracked (auto): {len(already_tracked)} "
+          f"| recent notes (<= {args.recent_days}d): {len(recent)}")
     print(f"Mode: {'APPLY' if apply else 'DRY-RUN'}\n")
     if not recent:
         print("No recently-edited notes; nothing to do.")
         return 0
 
-    result = ask_model(open_items, build_context(recent), args.endpoint, args.model,
-                       args.timeout, args.retries)
+    result = ask_model(open_items, already_tracked, build_context(recent), args.endpoint,
+                       args.model, args.timeout, args.retries)
 
     # --- Completions: surgical line edits on the body ---
     lines = body_no_auto.splitlines()
