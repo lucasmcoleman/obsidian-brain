@@ -27,11 +27,20 @@ deployment is reproducible from the repo (the compose file itself lives outside 
       - "8053:8000"
     volumes:
       - /server/obsidian:/vault
+      - /server/.obsidian-moc-backups:/backups   # durable pre-edit backups (outside the vault)
     environment:
       - OBSIDIAN_VAULT_PATH=/vault
       - LM_BASE_URL=http://192.168.0.29:1234/v1
       - EMBEDDING_MODEL=text-embedding-nomic-embed-text-v2-moe
       - PYTHONUNBUFFERED=1
+      - TZ=America/New_York
+      - BRAIN_REFRESH_AT_HOUR=3
+      # Nightly vault maintenance after the index refresh (see section below).
+      - BRAIN_LINKER_ENABLED=1
+      - BRAIN_LEDGER_ENABLED=1
+      - LINKER_CHAT_URL=http://192.168.0.29:4004/v1
+      - LINKER_CHAT_MODEL=unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+      - MOC_BACKUP_DIR=/backups
     networks:
       backend:
         aliases:
@@ -75,6 +84,35 @@ Env (set in the compose service):
 | `BRAIN_REFRESH_FORCE` | `0` | `1` = full re-embed nightly vs. rebuild-only-if-changed |
 
 Verify: `docker logs obsidian-brain-mcp | grep refresh`.
+
+## Nightly vault maintenance (baked in)
+
+After each nightly index refresh, the same daemon thread runs two bundled scripts
+against the vault (also baked into the image, so a clone gets them):
+
+1. **`moc_linker.py`** — classifies every note into the right MOC, writes `moc:`
+   frontmatter, and regenerates each note's semantic `## Related Notes` section
+   (top-5 by embedding similarity). Idempotent; backups are written **outside the
+   vault** so Obsidian never indexes them.
+2. **`ledger_update.py`** — updates `open-action-items-ledger.md`: checks off open
+   items with clear completion evidence in recently-edited notes (surgical line
+   edits only) and appends newly-surfaced action items under a managed
+   `<!-- ledger-auto -->` block. Backs up the ledger outside the vault first.
+
+These need an OpenAI-compatible **chat** model (classification + ledger reasoning)
+and an **embeddings** model (related links). Endpoints default to `LM_BASE_URL` so a
+single-endpoint clone works; this deployment points the chat model at llama-swap.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `BRAIN_LINKER_ENABLED` | `1` | run the MOC/Related linker after refresh |
+| `BRAIN_LEDGER_ENABLED` | `1` | run the action-items ledger update after refresh |
+| `BRAIN_POSTREFRESH_ON_START` | `0` | also run these on boot (heavy; nightly always runs them) |
+| `LINKER_CHAT_URL` | `LM_BASE_URL` | chat endpoint for classification + ledger |
+| `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | chat model id |
+
+Embeddings reuse `LM_BASE_URL` + `EMBEDDING_MODEL`. Verify:
+`docker logs obsidian-brain-mcp | grep -E 'linker|ledger'`.
 
 ## Transports
 
