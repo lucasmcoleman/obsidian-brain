@@ -4,12 +4,25 @@ Handles context retrieval and write-back to the vault.
 """
 import json
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
-from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR
+from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR, INDEX_PATH, METADATA_PATH
 from indexer import build_index, ensure_dirs
 from searcher import search, format_results
+from safe_paths import (
+    resolve_in_vault,
+    PathOutsideVault,
+    detect_newline,
+    atomic_write_bytes,
+)
+
+
+def _slugify(name: str) -> str:
+    """Lowercase, collapse every run of non-alphanumeric characters to a single
+    '-', and strip leading/trailing dashes (audit finding L11)."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def get_or_build_index() -> dict:
@@ -22,54 +35,74 @@ def query_brain(query: str, top_k: int = 5) -> str:
     """
     Main retrieval entry point. Called by the agent when a user message
     might benefit from vault context.
-    Returns a formatted context string.
+    Returns a formatted context string. Distinguishes "no index built yet" from
+    "index exists but nothing matched" so the agent can self-heal (L19).
     """
+    if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
+        return ("No index has been built yet. Run brain_build_index (or the CLI "
+                "`indexer.py --force`) before querying the brain.")
     results = search(query, top_k=top_k)
     return format_results(results, query)
 
 
-def write_entity_note(entity_name: str, initial_content: str = "") -> str:
+def write_entity_note(entity_name: str, initial_content: str = "") -> dict:
     """
-    Create or update an entity note in _brain/entities/.
-    Called when the agent learns about a new person, project, or concept.
+    Create an entity note in _brain/entities/. Returns a structured result that
+    distinguishes a fresh create from an already-existing note, so a caller's
+    supplied content is never silently discarded (audit findings M14/M15).
+    Existing entity files are never overwritten — use append_insight to add to one.
     """
-    ensure_dirs()
-    slug = entity_name.lower().replace(" ", "-").replace("/", "-")
+    slug = _slugify(entity_name)
     filepath = Path(ENTITIES_DIR) / f"{slug}.md"
+    filepath.parent.mkdir(parents=True, exist_ok=True)
     if filepath.exists():
-        return str(filepath)
+        return {
+            "status": "exists",
+            "slug": slug,
+            "path": str(filepath),
+            "detail": "Entity already exists; not modified. Use append_insight to add to it.",
+        }
 
     content = f"# {entity_name}\n\n"
     if initial_content:
         content += f"{initial_content}\n\n"
     content += f"> Created by Obsidian Brain on {datetime.now().strftime('%Y-%m-%d')}\n"
     filepath.write_text(content, encoding="utf-8")
-    return str(filepath)
+    return {"status": "created", "slug": slug, "path": str(filepath)}
 
 
-def append_insight(note_path: str, insight: str, context: str = "") -> str:
+def append_insight(note_path: str, insight: str, context: str = "") -> dict:
     """
-    Append an insight to a note. Used after conversations to record
-    new facts, decisions, or conclusions.
-    The note_path can be absolute or relative to the vault.
+    Append a timestamped insight section to a note. Returns a structured result
+    with an explicit status (audit findings M14/M10). The note_path may be
+    absolute or vault-relative; it must resolve inside the vault and be *.md.
+    Preserves the note's existing line endings and writes atomically.
     """
-    if not os.path.isabs(note_path):
-        note_path = os.path.join(VAULT_PATH, note_path)
+    try:
+        target = resolve_in_vault(note_path, VAULT_PATH)
+    except PathOutsideVault as e:
+        return {"status": "error", "detail": f"Refused: {e}"}
 
-    if not os.path.exists(note_path):
-        return f"Note not found: {note_path}"
+    if not target.exists():
+        return {"status": "error", "detail": f"Note not found: {target}"}
 
-    existing = Path(note_path).read_text(encoding="utf-8")
+    raw = target.read_bytes()
+    existing = raw.decode("utf-8")
+    nl = detect_newline(raw)
 
-    section = f"\n\n## Brain Insight — {datetime.now().strftime('%Y-%m-%d')}\n\n"
+    lines = [
+        "",
+        "",
+        f"## Brain Insight — {datetime.now().strftime('%Y-%m-%d')}",
+        "",
+    ]
     if context:
-        section += f"**Context:** {context}\n\n"
-    section += f"{insight}\n"
-    section += f"\n> _Recorded by Obsidian Brain_"
+        lines += [f"**Context:** {context}", ""]
+    lines += [insight, "", "> _Recorded by Obsidian Brain_"]
+    section = nl.join(lines)
 
-    updated = existing + section
-    Path(note_path).write_text(updated, encoding="utf-8")
-    return f"Appended insight to {note_path}"
+    atomic_write_bytes(target, (existing + section).encode("utf-8"))
+    return {"status": "ok", "path": str(target), "detail": f"Appended insight to {target}"}
 
 
 def consolidate() -> dict:

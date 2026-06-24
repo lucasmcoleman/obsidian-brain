@@ -97,11 +97,14 @@ def brain_query(query: str, top_k: int = 5) -> str:
 def brain_write_entity(name: str, initial_content: str = "") -> str:
     """Create a new entity note in _brain/entities/ for a person, project, or concept.
 
-    Use when you encounter something new worth tracking persistently. Returns the
-    path to the created (or already-existing) note. Confirm with the user before
-    writing unless they explicitly said to remember it.
+    Use when you encounter something new worth tracking persistently. Returns a
+    JSON result with a status of "created" or "exists" (an existing entity is
+    never overwritten — use brain_append_insight to add to it). Confirm with the
+    user before writing unless they explicitly said to remember it.
     """
-    return write_entity_note(entity_name=name, initial_content=initial_content)
+    return json.dumps(
+        write_entity_note(entity_name=name, initial_content=initial_content), indent=2
+    )
 
 
 @mcp.tool()
@@ -110,10 +113,13 @@ def brain_append_insight(note_path: str, insight: str, context: str = "") -> str
 
     `note_path` may be absolute or relative to the vault (e.g. 'Projects/Delta.md').
     Use after a conversation where you learn something new about a person, project,
-    or decision. `context` optionally records what prompted the insight. Confirm
-    with the user before writing unless they explicitly said to remember it.
+    or decision. `context` optionally records what prompted the insight. Returns
+    a JSON result with an explicit "ok"/"error" status. Confirm with the user
+    before writing unless they explicitly said to remember it.
     """
-    return append_insight(note_path=note_path, insight=insight, context=context)
+    return json.dumps(
+        append_insight(note_path=note_path, insight=insight, context=context), indent=2
+    )
 
 
 @mcp.tool()
@@ -164,13 +170,16 @@ def brain_status() -> str:
     }
 
     if os.path.exists(METADATA_PATH):
-        meta = json.loads(Path(METADATA_PATH).read_text())
-        status.update({
-            "notes_indexed": meta.get("num_notes", "unknown"),
-            "chunks": meta.get("num_chunks", "unknown"),
-            "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
-            "index_mtime": meta.get("index_mtime", "unknown"),
-        })
+        try:
+            meta = json.loads(Path(METADATA_PATH).read_text())
+            status.update({
+                "notes_indexed": meta.get("num_notes", "unknown"),
+                "chunks": meta.get("num_chunks", "unknown"),
+                "embedding_model": meta.get("embedding_model", EMBEDDING_MODEL),
+                "index_mtime": meta.get("index_mtime", "unknown"),
+            })
+        except (json.JSONDecodeError, OSError) as e:
+            status["notes_indexed"] = f"metadata unreadable ({e})"
     else:
         status["notes_indexed"] = "no index"
 
@@ -204,6 +213,23 @@ def _resolve_transport() -> str:
     if "--stdio" in sys.argv:
         return "stdio"
     return os.environ.get("MCP_TRANSPORT", "stdio")
+
+
+def _build_http_app():
+    """Build the streamable-HTTP Starlette app, installing bearer-token auth when
+    BRAIN_AUTH_TOKEN is set. Auth is opt-in so network-isolated deployments keep
+    working unchanged; when unset we log a loud warning (audit finding H1)."""
+    from auth import BearerAuthMiddleware
+
+    app = mcp.streamable_http_app()
+    token = os.environ.get("BRAIN_AUTH_TOKEN", "").strip()
+    if token:
+        app.add_middleware(BearerAuthMiddleware, token=token, public_paths={"/health"})
+        print("[auth] bearer-token auth enabled on HTTP transport", flush=True)
+    else:
+        print("[auth] WARNING: BRAIN_AUTH_TOKEN unset — HTTP tools are UNAUTHENTICATED; "
+              "restrict the port to a trusted network or set a token", flush=True)
+    return app
 
 
 # ── Nightly index refresh (baked into the service) ──────────────────────────
@@ -309,4 +335,15 @@ if __name__ == "__main__":
     transport = _resolve_transport()
     if transport == "streamable-http":
         _maybe_start_scheduler()
-    mcp.run(transport=transport)
+        # Run uvicorn ourselves (mirroring FastMCP.run_streamable_http_async) so we
+        # can install the auth middleware on the app before it starts serving.
+        import uvicorn
+
+        uvicorn.run(
+            _build_http_app(),
+            host=mcp.settings.host,
+            port=mcp.settings.port,
+            log_level=mcp.settings.log_level.lower(),
+        )
+    else:
+        mcp.run(transport=transport)

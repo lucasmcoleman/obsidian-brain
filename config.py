@@ -15,3 +15,9 @@ EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v2-moe"
 CHUNK_SIZE = 500  # tokens per chunk
 CHUNK_OVERLAP = 50  # tokens overlap
 TOP_K = 5  # number of chunks to retrieve
+
+# Embedding request hardening (audit findings M4/M5/M6). All env-overridable so a
+# large vault or a slow endpoint can be tuned without editing code.
+EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", "64"))  # texts per request
+EMBED_TIMEOUT = float(os.environ.get("EMBED_TIMEOUT", "30"))      # per-request seconds
+EMBED_MAX_RETRIES = int(os.environ.get("EMBED_MAX_RETRIES", "3")) # per-batch attempts
