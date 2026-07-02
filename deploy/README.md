@@ -39,7 +39,8 @@ deployment is reproducible from the repo (the compose file itself lives outside 
       - BRAIN_LINKER_ENABLED=1
       - BRAIN_LEDGER_ENABLED=1
       - LINKER_CHAT_URL=http://192.168.0.29:4004/v1
-      - LINKER_CHAT_MODEL=unsloth/Qwen3.6-35B-A3B-MTP-GGUF
+      - LINKER_CHAT_MODEL=qwen3.5:9b                          # NPU (FastFlowLM), GPU-free
+      - LEDGER_CHAT_MODEL=unsloth/Qwen3.6-35B-A3B-MTP-GGUF    # stronger; ledger only
       - MOC_BACKUP_DIR=/backups
     networks:
       backend:
@@ -108,8 +109,10 @@ single-endpoint clone works; this deployment points the chat model at llama-swap
 | `BRAIN_LINKER_ENABLED` | `1` | run the MOC/Related linker after refresh |
 | `BRAIN_LEDGER_ENABLED` | `1` | run the action-items ledger update after refresh |
 | `BRAIN_POSTREFRESH_ON_START` | `0` | also run these on boot (heavy; nightly always runs them) |
-| `LINKER_CHAT_URL` | `LM_BASE_URL` | chat endpoint for classification + ledger |
-| `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | chat model id |
+| `LINKER_CHAT_URL` | `LM_BASE_URL` | chat endpoint for the linker (and ledger, unless overridden) |
+| `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | linker classification model (NPU `qwen3.5:9b` here) |
+| `LEDGER_CHAT_URL` | `LINKER_CHAT_URL` | chat endpoint for the ledger update |
+| `LEDGER_CHAT_MODEL` | `LINKER_CHAT_MODEL` | ledger model — harder task, use a stronger model (35B here) |
 
 Embeddings reuse `LM_BASE_URL` + `EMBEDDING_MODEL`. Verify:
 `docker logs obsidian-brain-mcp | grep -E 'linker|ledger'`.

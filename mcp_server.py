@@ -291,6 +291,11 @@ def _post_refresh_tasks() -> None:
     chat_url = os.environ.get("LINKER_CHAT_URL", lm)
     chat_model = os.environ.get("LINKER_CHAT_MODEL", "qwen3.6-35b-a3b-mtp")
     embed_model = os.environ.get("EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v2-moe")
+    # The ledger's reconcile/extract task is harder than the linker's per-note
+    # classification, so it can use a stronger model. Defaults to the linker's if
+    # unset (e.g. linker on the NPU 9B, ledger on the GPU 35B which is free overnight).
+    ledger_url = os.environ.get("LEDGER_CHAT_URL", chat_url)
+    ledger_model = os.environ.get("LEDGER_CHAT_MODEL", chat_model)
 
     if _truthy("BRAIN_LINKER_ENABLED", "1"):
         _run_script("moc_linker.py", [
@@ -300,7 +305,7 @@ def _post_refresh_tasks() -> None:
         ], "linker")
     if _truthy("BRAIN_LEDGER_ENABLED", "1"):
         _run_script("ledger_update.py", [
-            "--apply", "--vault", vault, "--endpoint", chat_url, "--model", chat_model,
+            "--apply", "--vault", vault, "--endpoint", ledger_url, "--model", ledger_model,
         ], "ledger")
 
 
