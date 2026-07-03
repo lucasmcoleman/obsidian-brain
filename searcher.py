@@ -10,7 +10,7 @@ from typing import Optional
 import faiss
 import numpy as np
 
-from config import VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K
+from config import VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K, EMBED_QUERY_PREFIX
 from embedder import embed_query
 from indexer import INDEX_LOCK
 
@@ -52,7 +52,9 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
               file=sys.stderr)
         return []
 
-    query_embedding = embed_query(query)
+    # Query gets the nomic "search_query: " prefix to match the "search_document: "
+    # prefix on indexed passages; both must be applied together (M-A).
+    query_embedding = embed_query(EMBED_QUERY_PREFIX + query)
     query_vec = np.array([query_embedding]).astype("float32")
 
     # Search FAISS (retrieve extra so dedup-by-note can still fill top_k)

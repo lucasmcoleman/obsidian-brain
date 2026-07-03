@@ -16,7 +16,7 @@ from typing import Any
 import faiss
 import numpy as np
 
-from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR, INDEX_PATH, METADATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL
+from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR, INDEX_PATH, METADATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, EMBED_DOC_PREFIX
 from embedder import embed_texts
 
 # Serializes the brief index file read (searcher) and write (build_index) within
@@ -199,7 +199,9 @@ def build_index(force: bool = False) -> dict[str, Any]:
         return {"status": "no_content", "notes": 0}
 
     print("Generating embeddings...")
-    texts = [c["text"] for c in all_chunks]
+    # Prefix the embedding INPUT only (nomic task instruction); the stored chunk
+    # text stays clean so retrieval returns the original passage (M-A).
+    texts = [EMBED_DOC_PREFIX + c["text"] for c in all_chunks]
     embeddings = embed_texts(texts)
 
     # Build FAISS index
