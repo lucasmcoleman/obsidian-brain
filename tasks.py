@@ -25,6 +25,33 @@ TASK_RE = re.compile(
 )
 
 
+def _code_fence_mask(lines: list[str]) -> list[bool]:
+    """Mark lines that are inside (or are) a ``` / ~~~ fenced code block.
+
+    A checkbox inside a fenced block is documentation/example, not a task, so both
+    the scanner and the completer must skip it — otherwise brain_tasks reports
+    phantom open tasks and brain_complete_task can rewrite a line inside a code
+    sample (audit finding M-G). A fence is only closed by the same delimiter
+    character that opened it, so a ~~~ inside a ``` block is treated as content.
+    """
+    mask = [False] * len(lines)
+    fence_char = None  # "`" or "~" while inside a fence, else None
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        delim = None
+        if stripped.startswith("```"):
+            delim = "`"
+        elif stripped.startswith("~~~"):
+            delim = "~"
+        if delim and (fence_char is None or fence_char == delim):
+            # Toggle the fence; the delimiter line itself is part of the fence.
+            fence_char = delim if fence_char is None else None
+            mask[i] = True
+        elif fence_char is not None:
+            mask[i] = True  # interior content (incl. a different delimiter char)
+    return mask
+
+
 def _iter_md_files(vault: Path):
     for md in vault.rglob("*.md"):
         if "_brain" in md.parts:  # skip brain-generated notes
@@ -47,7 +74,10 @@ def scan_tasks(status: str = "open", vault_path: Optional[str] = None) -> list[d
         except Exception:
             continue
         rel = str(md.relative_to(vault))
+        fenced = _code_fence_mask(lines)
         for i, line in enumerate(lines, 1):
+            if fenced[i - 1]:  # skip checkboxes inside fenced code blocks (M-G)
+                continue
             m = TASK_RE.match(line)
             if not m:
                 continue
@@ -99,10 +129,12 @@ def complete_task(
     # Split on the file's own line ending only (not splitlines(), which would
     # later force every line ending to LF on rewrite — audit finding M10).
     lines = raw.decode("utf-8").split(nl)
+    fenced = _code_fence_mask(lines)
     hits = [
         (i, m)
         for i, line in enumerate(lines)
-        if (m := TASK_RE.match(line))
+        if not fenced[i]  # never complete a checkbox inside a code fence (M-G)
+        and (m := TASK_RE.match(line))
         and m.group("mark") == " "
         and needle in m.group("text").strip().lower()
     ]
