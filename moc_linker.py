@@ -256,7 +256,10 @@ def upsert_managed_block(existing: str, block: str, title: str) -> str:
         re.escape(MANAGED_BEGIN) + r".*?" + re.escape(MANAGED_END), flags=re.S
     )
     if pattern.search(existing):
-        return pattern.sub(block, existing).rstrip() + "\n"
+        # `block` carries model-generated desc/titles; pass it as a function
+        # replacement so backslashes / \1 group-refs are inserted verbatim
+        # rather than interpreted as a re.sub template (audit finding H-A).
+        return pattern.sub(lambda _m: block, existing).rstrip() + "\n"
     header = existing.strip()
     if not header:
         header = f"# {title}"
@@ -317,7 +320,9 @@ def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
         if text.startswith("---") and "\n---" in text:
             head, _, rest = text[3:].partition("\n---")
             if re.search(r"^moc:", head, flags=re.M):
-                new_head = re.sub(r"^moc:.*$", f"moc: {link}", head, flags=re.M)
+                # Function replacement so a backslash in the link never triggers
+                # re.sub template interpretation (audit finding H-A).
+                new_head = re.sub(r"^moc:.*$", lambda _m: f"moc: {link}", head, flags=re.M)
             else:
                 new_head = head.rstrip("\n") + f"\nmoc: {link}\n"
             new_text = f"---{new_head}\n---{rest}"
@@ -372,7 +377,9 @@ def upsert_related_block(text: str, block: str) -> str:
     """Replace the managed Related block, or append it at the end of the note."""
     pattern = re.compile(re.escape(RELATED_BEGIN) + r".*?" + re.escape(RELATED_END), flags=re.S)
     if pattern.search(text):
-        return pattern.sub(block, text).rstrip() + "\n"
+        # Function replacement: model-generated block inserted verbatim, never
+        # interpreted as a re.sub replacement template (audit finding H-A).
+        return pattern.sub(lambda _m: block, text).rstrip() + "\n"
     return text.rstrip() + "\n\n" + block + "\n"
 
 
