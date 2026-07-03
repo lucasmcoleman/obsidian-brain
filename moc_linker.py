@@ -150,28 +150,61 @@ def discover_mocs(vault: Path) -> list[str]:
 # ----------------------------------------------------------------------------
 # Local model client
 # ----------------------------------------------------------------------------
+def _iter_json_objects(text: str):
+    """Yield every balanced top-level {...} object in text, tracking JSON string
+    state so braces INSIDE quoted values (even unbalanced ones) don't throw off
+    the depth count. The old re.findall(r"\{[^{}]*\}") could not match any object
+    containing a brace at all — a Templater `{{date}}`, a dict/LaTeX snippet, or a
+    stray `}` in a quoted value silently dropped the note to Unsorted forever
+    (audit finding M-I)."""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                        if isinstance(obj, dict):
+                            yield obj
+                    except json.JSONDecodeError:
+                        pass
+                    break
+        start = text.find("{", start + 1)
+
+
 def extract_json(content: str) -> Optional[dict]:
-    """Pull the first JSON object out of a model response."""
+    """Pull the answer JSON object out of a model response. Prefers the LAST
+    balanced object carrying a "moc" key (reasoning models often echo the template
+    before the real answer)."""
     if not content:
         return None
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M).strip()
     # Strip any stray <think> blocks that leaked into content.
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
-    # Collect candidate {...} objects; prefer the LAST one that parses and has
-    # a "moc" key (reasoning text often shows the template before the answer).
-    candidates = re.findall(r"\{[^{}]*\}", content, flags=re.S)
-    last_any = None
-    last_with_moc = None
-    for cand in candidates:
-        try:
-            obj = json.loads(cand)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            last_any = obj
-            if obj.get("moc"):
-                last_with_moc = obj
-    return last_with_moc or last_any
+    objects = list(_iter_json_objects(content))
+    if not objects:
+        return None
+    for obj in reversed(objects):
+        if obj.get("moc"):
+            return obj
+    return objects[-1]
 
 
 def classify_note(

@@ -97,3 +97,29 @@ def test_cross_link_skips_write_when_neighbors_unchanged(vault, monkeypatch):
 
     assert a.stat().st_mtime == OLD_MTIME
     assert b.stat().st_mtime == OLD_MTIME
+
+
+# ── M-I: extract_json must tolerate braces inside JSON string values ────────────
+def test_extract_json_handles_balanced_brace_in_desc():
+    obj = ml.extract_json('{"moc": "Code", "desc": "python dict {k: v} example"}')
+    assert obj == {"moc": "Code", "desc": "python dict {k: v} example"}
+
+
+def test_extract_json_handles_unbalanced_brace_inside_string():
+    obj = ml.extract_json('{"moc": "Projects", "desc": "cost } overrun fixed"}')
+    assert obj["moc"] == "Projects"
+
+
+def test_extract_json_prefers_last_object_with_moc_key():
+    text = ('Sure, the format is {"moc": "X", "desc": "y"}. Answer:\n'
+            '{"moc": "Work", "desc": "the real one"}')
+    assert ml.extract_json(text)["moc"] == "Work"
+
+
+def test_extract_json_from_fenced_block_with_templater_braces():
+    obj = ml.extract_json('```json\n{"moc": "Notes", "desc": "uses {{date}} templater"}\n```')
+    assert obj == {"moc": "Notes", "desc": "uses {{date}} templater"}
+
+
+def test_extract_json_returns_none_without_json():
+    assert ml.extract_json("no json here at all") is None
