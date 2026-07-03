@@ -153,10 +153,10 @@ def discover_mocs(vault: Path) -> list[str]:
 def _iter_json_objects(text: str):
     """Yield every balanced top-level {...} object in text, tracking JSON string
     state so braces INSIDE quoted values (even unbalanced ones) don't throw off
-    the depth count. The old re.findall(r"\{[^{}]*\}") could not match any object
-    containing a brace at all — a Templater `{{date}}`, a dict/LaTeX snippet, or a
-    stray `}` in a quoted value silently dropped the note to Unsorted forever
-    (audit finding M-I)."""
+    the depth count. The old non-nested-brace regex could not match any object
+    containing a brace at all — a Templater brace pair, a dict/LaTeX snippet, or a
+    stray closing brace in a quoted value silently dropped the note to Unsorted
+    forever (audit finding M-I)."""
     start = text.find("{")
     while start != -1:
         depth = 0
