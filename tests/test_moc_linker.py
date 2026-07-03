@@ -123,3 +123,56 @@ def test_extract_json_from_fenced_block_with_templater_braces():
 
 def test_extract_json_returns_none_without_json():
     assert ml.extract_json("no json here at all") is None
+
+
+# ── M-H: tag_notes must not corrupt frontmatter ────────────────────────────────
+def _tag(vault, note, moc="Work MOC"):
+    ml.tag_notes(vault, [{"moc": moc, "abs": note, "rel": note.name}], apply=True)
+    return note.read_text(encoding="utf-8")
+
+
+def test_tag_notes_replaces_list_form_moc_without_orphaning(vault):
+    note = write_note(vault, "n.md",
+                      '---\ntitle: Foo\nmoc:\n  - "[[Old MOC]]"\ntags: [a, b]\n---\nBody here\n')
+    out = _tag(vault, note)
+    assert 'moc: "[[Work MOC]]"' in out
+    assert "[[Old MOC]]" not in out          # old list value removed, not orphaned
+    assert '- "[[Old MOC]]"' not in out
+    assert "title: Foo" in out and "tags: [a, b]" in out  # other keys preserved
+    assert "Body here" in out
+
+
+def test_tag_notes_does_not_hoist_body_when_note_opens_with_a_divider(vault):
+    # Leading '---' used as a thematic break, with a later '---' divider too.
+    note = write_note(vault, "n.md",
+                      "---\n\n# Real Heading\n\nSome intro.\n\n---\n\nMore content.\n")
+    out = _tag(vault, note)
+    assert 'moc: "[[Work MOC]]"' in out
+    # The heading/body must remain body, not be absorbed into frontmatter.
+    assert "# Real Heading" in out
+    assert "More content." in out
+    # frontmatter is only the moc line we added, then the original text follows
+    assert out.startswith('---\nmoc: "[[Work MOC]]"\n---\n')
+
+
+def test_tag_notes_replaces_scalar_moc(vault):
+    note = write_note(vault, "n.md", '---\nmoc: "[[Old]]"\ntitle: X\n---\nBody\n')
+    out = _tag(vault, note)
+    assert 'moc: "[[Work MOC]]"' in out
+    assert "[[Old]]" not in out
+    assert "title: X" in out
+
+
+def test_tag_notes_adds_frontmatter_when_absent(vault):
+    note = write_note(vault, "n.md", "# Just a note\n\nno frontmatter here\n")
+    out = _tag(vault, note)
+    assert out.startswith('---\nmoc: "[[Work MOC]]"\n---\n')
+    assert "# Just a note" in out
+
+
+def test_tag_notes_is_idempotent_after_first_apply(vault):
+    note = write_note(vault, "n.md", '---\ntitle: X\n---\nBody\n')
+    _tag(vault, note)
+    os.utime(note, (OLD_MTIME, OLD_MTIME))
+    _tag(vault, note)  # second run must be a no-op
+    assert note.stat().st_mtime == OLD_MTIME

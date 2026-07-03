@@ -357,6 +357,47 @@ def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
             print(preview + ("\n  ..." if len(new_content.splitlines()) > 12 else ""))
 
 
+_FM_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.S)
+
+
+def _looks_like_frontmatter(head: str) -> bool:
+    """True only if the block between leading '---' fences is really YAML
+    frontmatter (its first non-empty line is a key), not body content sitting
+    between two '---' thematic breaks (audit finding M-H)."""
+    for line in head.splitlines():
+        if not line.strip():
+            continue
+        return bool(re.match(r"^[ \t]*[A-Za-z0-9_.\-]+[ \t]*:", line))
+    return False
+
+
+def _set_frontmatter_moc(text: str, link: str) -> str:
+    """Set `moc: <link>` in a note's frontmatter without corrupting it:
+
+    - Only treats a leading '---' block as frontmatter when it really is one, so a
+      note that merely OPENS with a '---' divider doesn't get its body hoisted in.
+    - Replaces an existing `moc:` key AND any indented/list continuation lines
+      under it, so a block/list-form `moc:` value isn't left as an orphaned,
+      invalid-YAML list item beneath the new scalar (audit finding M-H).
+    """
+    m = _FM_RE.match(text)
+    if not m or not _looks_like_frontmatter(m.group(1)):
+        return f"---\nmoc: {link}\n---\n\n{text}"
+    head, rest = m.group(1), text[m.end():]
+    out, dropping = [], False
+    for line in head.splitlines():
+        if re.match(r"^moc[ \t]*:", line):
+            dropping = True  # drop the moc key and its block/list continuation
+            continue
+        if dropping:
+            if re.match(r"^([ \t]+\S|[ \t]*-[ \t])", line):
+                continue
+            dropping = False
+        out.append(line)
+    out.append(f"moc: {link}")
+    return "---\n" + "\n".join(out) + "\n---\n" + rest
+
+
 def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
     """Optionally add `moc: "[[<MOC>]]"` to each note's frontmatter."""
     backup_dir = backup_root(vault) / "notes"
@@ -366,17 +407,7 @@ def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
         path: Path = r["abs"]
         text = path.read_text(encoding="utf-8")
         link = f'"[[{r["moc"]}]]"'
-        if text.startswith("---") and "\n---" in text:
-            head, _, rest = text[3:].partition("\n---")
-            if re.search(r"^moc:", head, flags=re.M):
-                # Function replacement so a backslash in the link never triggers
-                # re.sub template interpretation (audit finding H-A).
-                new_head = re.sub(r"^moc:.*$", lambda _m: f"moc: {link}", head, flags=re.M)
-            else:
-                new_head = head.rstrip("\n") + f"\nmoc: {link}\n"
-            new_text = f"---{new_head}\n---{rest}"
-        else:
-            new_text = f"---\nmoc: {link}\n---\n\n{text}"
+        new_text = _set_frontmatter_moc(text, link)
         if apply:
             if new_text == text:
                 continue  # moc: already correct; skip to avoid mtime churn (H-B)
