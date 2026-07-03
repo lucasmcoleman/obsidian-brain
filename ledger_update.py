@@ -157,21 +157,72 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
-def filter_completions_by_evidence(completed: list[dict], context: str,
+# Words too generic (or too completion-verb-ish) to bind an evidence quote to a
+# specific item — excluded when checking that the quote is actually ABOUT the item.
+_BINDING_STOPWORDS = {
+    "sent", "send", "done", "made", "make", "have", "will", "been", "with",
+    "that", "this", "from", "into", "about", "your", "their", "there", "here",
+    "finished", "finish", "complete", "completed", "completing", "submitted",
+    "submit", "resolved", "resolve", "item", "task", "note", "notes", "today",
+    "yesterday", "the", "and", "for", "was", "were",
+}
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _significant_tokens(s: str) -> set[str]:
+    """Distinctive words (>=4 chars, not a generic/completion-verb stopword) used
+    to test whether an evidence quote is actually about a given item."""
+    return {t for t in _TOKEN_RE.findall((s or "").lower())
+            if len(t) >= 4 and t not in _BINDING_STOPWORDS}
+
+
+def filter_completions_by_evidence(completed: list[dict], notes: list[dict],
+                                   candidates: list[dict],
                                    min_len: int = MIN_EVIDENCE_LEN) -> list[dict]:
-    """Keep only completions whose evidence quote actually appears (normalized) in
-    the note context sent to the model. Defeats hallucinated and prompt-injected
-    completions, which can otherwise check off unfinished items (audit finding
-    M12) — the model proposes; this is the deterministic guard."""
-    ctx = _normalize(context)
+    """Deterministic gate that keeps only trustworthy completions (audit finding
+    M-M sharpens M12). The model proposes; this disposes. A completion survives
+    only if ALL hold:
+
+    1. Its evidence quote (normalized, >= min_len) is a substring of actual NOTE
+       CONTENT — the concatenated raw note bodies, NOT the assembled prompt. The
+       old check ran against build_context's output, so the fence/`file:` header
+       boilerplate the tool injects could itself satisfy the gate.
+    2. The evidence is BOUND to the specific item it claims to complete: it shares
+       distinctive words with THAT candidate's text, so a real quote about task X
+       cannot check off unrelated task Y (the model picks both `n` and evidence).
+
+    The bias is deliberately conservative — a rejected legitimate completion just
+    leaves the item open (visible, recoverable, re-proposed next run), whereas a
+    false completion silently marks undone work done."""
+    haystack = _normalize("\n".join(n.get("body", "") for n in notes))
+    by_n = {c["n"]: c.get("text", "") for c in candidates}
     kept = []
     for c in completed:
         ev = _normalize(c.get("evidence", ""))
-        if len(ev) >= min_len and ev in ctx:
-            kept.append(c)
-        else:
-            print(f"  ! dropping completion n={c.get('n')}: evidence not found in notes "
-                  f"({c.get('evidence', '')[:60]!r})", file=sys.stderr)
+        if len(ev) < min_len or ev not in haystack:
+            print(f"  ! dropping completion n={c.get('n')}: evidence not found in note "
+                  f"content ({c.get('evidence', '')[:60]!r})", file=sys.stderr)
+            continue
+        try:
+            n = int(c.get("n"))
+        except (TypeError, ValueError):
+            print(f"  ! dropping completion: non-numeric n={c.get('n')!r}", file=sys.stderr)
+            continue
+        item_text = by_n.get(n)
+        if item_text is None:
+            print(f"  ! dropping completion n={n}: no such open item", file=sys.stderr)
+            continue
+        item_tokens = _significant_tokens(item_text)
+        shared = _significant_tokens(ev) & item_tokens
+        # Require overlap with the item's distinctive words. When the item has
+        # >=2 such words, require 2 (guards against binding on a single shared
+        # common noun); an item with only 0-1 distinctive words needs that one.
+        required = min(2, len(item_tokens))
+        if len(shared) < required:
+            print(f"  ! dropping completion n={n}: evidence not about this item "
+                  f"(shared={sorted(shared)})", file=sys.stderr)
+            continue
+        kept.append(c)
     return kept
 
 
@@ -367,7 +418,7 @@ def main() -> int:
     # --- Completions: validate the model's evidence against the actual note text
     # (drops hallucinated/injected completions — M12), then apply to the correct
     # region (body or auto block).
-    validated = filter_completions_by_evidence(result.get("completed", []), context)
+    validated = filter_completions_by_evidence(result.get("completed", []), recent, candidates)
     body_lines = body_no_auto.splitlines()
     auto_lines = existing_auto.splitlines()
     completed = apply_completions(validated, candidates, body_lines, auto_lines, today)

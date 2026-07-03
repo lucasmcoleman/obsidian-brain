@@ -35,16 +35,45 @@ def test_extract_auto_block_with_trailing_curated_content():
     assert "Trailing curated" not in block
 
 
-# ── M12: completions whose evidence isn't in the context are dropped ────────────
-def test_filter_completions_requires_evidence_in_context():
-    context = "Today I finally sent the cohort 2 onboarding email to everyone."
-    completed = [
-        {"n": 1, "evidence": "sent the cohort 2 onboarding email"},  # real, present
-        {"n": 2, "evidence": "completed the tax filing"},            # hallucinated
-        {"n": 3, "evidence": "done"},                                # too short
-    ]
-    kept = lu.filter_completions_by_evidence(completed, context)
+# ── M12/M-M: evidence must be real note content, bound to the item it completes ─
+_NOTES = [{
+    "rel": "n.md",
+    "body": "Today I finally sent the cohort 2 onboarding email to everyone.",
+}]
+_CANDS = [
+    {"n": 1, "text": "Send the cohort 2 onboarding email"},
+    {"n": 2, "text": "Draft the AI/PII incident response playbook"},
+]
+
+
+def test_filter_keeps_real_item_bound_evidence():
+    completed = [{"n": 1, "evidence": "sent the cohort 2 onboarding email"}]
+    kept = lu.filter_completions_by_evidence(completed, _NOTES, _CANDS)
     assert [c["n"] for c in kept] == [1]
+
+
+def test_filter_drops_hallucinated_and_short_evidence():
+    completed = [
+        {"n": 1, "evidence": "completed the tax filing"},  # not in any note
+        {"n": 1, "evidence": "done"},                      # too short
+    ]
+    kept = lu.filter_completions_by_evidence(completed, _NOTES, _CANDS)
+    assert kept == []
+
+
+def test_filter_binds_evidence_to_the_specific_item():
+    # A real quote about item 1's task must NOT check off unrelated item 2 (M-M).
+    completed = [{"n": 2, "evidence": "sent the cohort 2 onboarding email"}]
+    kept = lu.filter_completions_by_evidence(completed, _NOTES, _CANDS)
+    assert kept == []
+
+
+def test_filter_rejects_the_tools_own_fence_boilerplate_as_evidence():
+    # The fence/header text build_context injects is present in the assembled
+    # prompt but is NOT note content — it must never satisfy the gate (M-M).
+    completed = [{"n": 1, "evidence": lu.NOTE_FENCE}]
+    kept = lu.filter_completions_by_evidence(completed, _NOTES, _CANDS)
+    assert kept == []
 
 
 # ── L20 feature: open items inside the auto-block are completion candidates ─────
