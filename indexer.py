@@ -69,6 +69,25 @@ def _build_lock():
             f.close()
 
 
+def _index_is_consistent(existing_meta: dict[str, Any]) -> bool:
+    """True only if index.faiss is loadable AND its row count matches the metadata
+    chunk count. A signature match alone does not prove the on-disk index is usable
+    — a corrupt/truncated index.faiss (bad LiveSync replication of _brain/, a torn
+    swap) with intact metadata would otherwise be trusted forever, silently serving
+    zero results with no rebuild path (audit finding M-K)."""
+    try:
+        idx = faiss.read_index(INDEX_PATH)
+    except (RuntimeError, OSError) as e:
+        print(f"[indexer] existing index unreadable ({e}); forcing rebuild", file=sys.stderr)
+        return False
+    if idx.ntotal != len(existing_meta.get("chunks", [])):
+        print(f"[indexer] existing index/metadata out of sync "
+              f"(ntotal={idx.ntotal}, chunks={len(existing_meta.get('chunks', []))}); "
+              f"forcing rebuild", file=sys.stderr)
+        return False
+    return True
+
+
 def _vault_signature(notes: list[dict[str, Any]]) -> str:
     """A fingerprint of the indexed file SET (relative path + mtime), so the
     incremental freshness check detects deletions and renames — not just the max
@@ -171,7 +190,8 @@ def build_index(force: bool = False) -> dict[str, Any]:
             current_sig = _vault_signature(notes)
             # Rebuild if the file SET or any mtime changed (catches deletions and
             # renames, which a max-mtime check alone misses — audit finding M7).
-            if existing_sig is not None and existing_sig == current_sig:
+            if (existing_sig is not None and existing_sig == current_sig
+                    and _index_is_consistent(existing_meta)):
                 return {
                     "status": "already_current",
                     "notes": existing_meta.get("num_notes", len(notes)),

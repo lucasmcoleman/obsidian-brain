@@ -81,6 +81,39 @@ def test_scan_vault_skips_unreadable_note_without_crashing(brain_paths, make_not
     assert "good.md" in paths  # L12: survivors still indexed
 
 
+def test_incremental_build_rebuilds_when_index_file_is_corrupt(brain_paths, make_note, fake_embed):
+    # A corrupt index.faiss with intact metadata + unchanged vault must NOT be
+    # trusted as already_current — otherwise every query silently returns nothing
+    # forever with no rebuild path (audit finding M-K).
+    make_note("a.md", "Alpha content about apples.")
+    indexer.build_index(force=True)
+
+    Path(brain_paths["index_path"]).write_bytes(b"not a real faiss index")
+    result = indexer.build_index(force=False)
+
+    assert result["status"] == "built"  # not "already_current"
+    import faiss
+    idx = faiss.read_index(brain_paths["index_path"])
+    meta = json.loads(Path(brain_paths["meta_path"]).read_text())
+    assert idx.ntotal == len(meta["chunks"])  # rebuilt to a consistent state
+
+
+def test_incremental_build_rebuilds_on_index_metadata_count_mismatch(brain_paths, make_note, fake_embed):
+    # index.faiss and metadata disagree on row count (a torn swap / bad LiveSync
+    # replication of _brain/), vault unchanged → must rebuild, not report current.
+    big = ". ".join(f"sentence number {i} has several words in it" for i in range(300)) + "."
+    make_note("a.md", big)
+    indexer.build_index(force=True)
+
+    meta = json.loads(Path(brain_paths["meta_path"]).read_text())
+    assert len(meta["chunks"]) >= 2
+    meta["chunks"] = meta["chunks"][:-1]  # drop a chunk; vault_signature still matches
+    Path(brain_paths["meta_path"]).write_text(json.dumps(meta), encoding="utf-8")
+
+    result = indexer.build_index(force=False)
+    assert result["status"] == "built"
+
+
 def test_cleanup_removes_leftover_tmp_files(brain_paths):
     brain_dir = brain_paths["brain_dir"]
     brain_dir.mkdir(parents=True, exist_ok=True)
