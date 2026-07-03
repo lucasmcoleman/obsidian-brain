@@ -24,7 +24,10 @@ deployment is reproducible from the repo (the compose file itself lives outside 
     container_name: obsidian-brain-mcp
     restart: unless-stopped
     ports:
-      - "8053:8000"
+      # Publish to LOOPBACK ONLY — the tools read AND write the vault, so never
+      # expose this on the LAN. Reach it remotely via SSH port-forward or a
+      # reverse proxy (SWAG/Authelia). (audit findings H-1 / M-N)
+      - "127.0.0.1:8053:8000"
     volumes:
       - /server/obsidian:/vault
       - /server/.obsidian-moc-backups:/backups   # durable pre-edit backups (outside the vault)
@@ -32,6 +35,12 @@ deployment is reproducible from the repo (the compose file itself lives outside 
       - OBSIDIAN_VAULT_PATH=/vault
       - LM_BASE_URL=http://192.168.0.29:1234/v1
       - EMBEDDING_MODEL=text-embedding-nomic-embed-text-v2-moe
+      # Require a bearer token on every HTTP request except /health (audit H-1).
+      # Generate once: `openssl rand -hex 32`. Without it the tools are open.
+      - BRAIN_AUTH_TOKEN=CHANGE_ME_openssl_rand_hex_32
+      # Enable DNS-rebinding/Origin protection despite the 0.0.0.0 container bind
+      # (the SDK only auto-enables it for a loopback bind) — audit M-N.
+      - BRAIN_ALLOWED_HOSTS=localhost:8053,127.0.0.1:8053
       - PYTHONUNBUFFERED=1
       - TZ=America/New_York
       - BRAIN_REFRESH_AT_HOUR=3
@@ -117,6 +126,25 @@ single-endpoint clone works; this deployment points the chat model at llama-swap
 Embeddings reuse `LM_BASE_URL` + `EMBEDDING_MODEL`. Verify:
 `docker logs obsidian-brain-mcp | grep -E 'linker|ledger'`.
 
+## Security
+
+The tools read **and write** the vault, so treat the endpoint as privileged:
+
+- **Bind loopback + token.** Publish `127.0.0.1:8053:8000` and set `BRAIN_AUTH_TOKEN`
+  (above). With no token the startup log prints `[auth] WARNING … UNAUTHENTICATED`.
+- **DNS-rebinding.** The MCP SDK only auto-enables Host/Origin validation for a
+  loopback *container* bind; this container binds `0.0.0.0`, so set
+  `BRAIN_ALLOWED_HOSTS` to the host[:port] clients send. Without it the startup log
+  prints a `[security] WARNING … protection is DISABLED`.
+- **Remote access** goes through SSH port-forward or a reverse proxy (SWAG/Authelia)
+  that terminates TLS and can inject the bearer header — never a raw LAN publish.
+
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `BRAIN_AUTH_TOKEN` | *(unset = open)* | require `Authorization: Bearer <token>` (except `/health`) |
+| `BRAIN_ALLOWED_HOSTS` | *(unset = off)* | comma-separated host[:port] allowlist; enables DNS-rebinding protection |
+| `BRAIN_ALLOWED_ORIGINS` | `http://<each host>` | comma-separated browser `Origin` allowlist |
+
 ## Transports
 
 `mcp_server.py` supports both:
@@ -127,6 +155,10 @@ Embeddings reuse `LM_BASE_URL` + `EMBEDDING_MODEL`. Verify:
 ## Register with an MCP client
 
 ```jsonc
-// Remote (streamable-HTTP)
-{ "mcpServers": { "obsidian-brain": { "url": "http://<host>:8053/mcp" } } }
+// Remote (streamable-HTTP). With BRAIN_AUTH_TOKEN set, pass it as a bearer header;
+// reach the loopback-bound port via an SSH forward or reverse proxy, not the LAN.
+{ "mcpServers": { "obsidian-brain": {
+    "url": "http://localhost:8053/mcp",
+    "headers": { "Authorization": "Bearer <token>" }
+} } }
 ```

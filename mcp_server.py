@@ -19,6 +19,10 @@ Environment:
     MCP_HOST              bind host for HTTP         (default 0.0.0.0)
     MCP_PORT              bind port for HTTP         (default 8000)
     MCP_PATH              streamable-HTTP path       (default /mcp)
+    BRAIN_AUTH_TOKEN      require Authorization: Bearer <token> on HTTP (unset = off)
+    BRAIN_ALLOWED_HOSTS   comma-separated host[:port] allowlist enabling DNS-rebinding
+                          protection when binding 0.0.0.0 (unset = protection off)
+    BRAIN_ALLOWED_ORIGINS comma-separated Origin allowlist (default: http://<each host>)
 
 Local registration (stdio), e.g. in ~/.claude/settings.json:
     {
@@ -63,11 +67,33 @@ from config import (
     LM_BASE_URL,
 )
 
+def _transport_security():
+    """Explicit DNS-rebinding / Host+Origin allowlist for streamable-HTTP. The MCP
+    SDK auto-enables this ONLY when binding a loopback host; this service binds
+    0.0.0.0 so a published host port can reach it, which silently disables it — a
+    browser the user merely visits could then DNS-rebind to the vault. Opt in by
+    setting BRAIN_ALLOWED_HOSTS to the host[:port] value(s) clients send
+    (comma-separated), optionally BRAIN_ALLOWED_ORIGINS (audit finding M-N)."""
+    hosts = [h.strip() for h in os.environ.get("BRAIN_ALLOWED_HOSTS", "").split(",") if h.strip()]
+    if not hosts:
+        return None
+    origins = [o.strip() for o in os.environ.get("BRAIN_ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    if not origins:
+        origins = [f"http://{h}" for h in hosts]
+    from mcp.server.transport_security import TransportSecuritySettings
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=hosts,
+        allowed_origins=origins,
+    )
+
+
 mcp = FastMCP(
     "obsidian-brain",
     host=os.environ.get("MCP_HOST", "0.0.0.0"),
     port=int(os.environ.get("MCP_PORT", "8000")),
     streamable_http_path=os.environ.get("MCP_PATH", "/mcp"),
+    transport_security=_transport_security(),
     # Stateless streamable-HTTP: every request is self-contained, so there is no
     # server-side session ID that can expire/recycle out from under a long-lived
     # client. This eliminates the keepalive churn where the client's periodic
@@ -229,6 +255,12 @@ def _build_http_app():
     else:
         print("[auth] WARNING: BRAIN_AUTH_TOKEN unset — HTTP tools are UNAUTHENTICATED; "
               "restrict the port to a trusted network or set a token", flush=True)
+    host = os.environ.get("MCP_HOST", "0.0.0.0")
+    if host not in ("127.0.0.1", "localhost", "::1") and not os.environ.get("BRAIN_ALLOWED_HOSTS", "").strip():
+        print(f"[security] WARNING: binding {host} without BRAIN_ALLOWED_HOSTS — "
+              "DNS-rebinding/Origin protection is DISABLED; set BRAIN_ALLOWED_HOSTS "
+              "to the host[:port] clients use, or bind loopback behind a proxy "
+              "(audit finding M-N)", flush=True)
     return app
 
 
