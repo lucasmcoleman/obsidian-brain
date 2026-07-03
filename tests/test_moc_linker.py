@@ -176,3 +176,21 @@ def test_tag_notes_is_idempotent_after_first_apply(vault):
     os.utime(note, (OLD_MTIME, OLD_MTIME))
     _tag(vault, note)  # second run must be a no-op
     assert note.stat().st_mtime == OLD_MTIME
+
+
+# ── M-J: write_mocs must prune a note reclassified out of its former MOC ────────
+def test_write_mocs_prunes_note_moved_out_of_a_moc(vault):
+    moc_dir = vault / ml.MOC_SUBDIR
+    moc_dir.mkdir(parents=True)
+    all_mocs = ["Work MOC", "Health MOC"]
+
+    ml.write_mocs(vault, {"Work MOC": [{"title": "Alpha", "desc": "a"}]},
+                  apply=True, all_mocs=all_mocs)
+    assert "[[Alpha]]" in (moc_dir / "Work MOC.md").read_text(encoding="utf-8")
+
+    # Alpha reclassified into Health; Work is no longer a by_moc key but IS a known
+    # MOC → its managed block must be regenerated empty (stale link pruned).
+    ml.write_mocs(vault, {"Health MOC": [{"title": "Alpha", "desc": "a"}]},
+                  apply=True, all_mocs=all_mocs)
+    assert "[[Alpha]]" not in (moc_dir / "Work MOC.md").read_text(encoding="utf-8")
+    assert "[[Alpha]]" in (moc_dir / "Health MOC.md").read_text(encoding="utf-8")

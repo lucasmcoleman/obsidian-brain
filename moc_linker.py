@@ -332,10 +332,18 @@ def backup_file(path: Path, backup_dir: Path) -> Optional[Path]:
     return dest
 
 
-def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
+def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool,
+               all_mocs: Optional[list[str]] = None) -> None:
     moc_dir = vault / MOC_SUBDIR
     backup_dir = backup_root(vault) / "mocs"
-    for moc_name, entries in sorted(by_moc.items()):
+    # Regenerate EVERY known MOC each run (empty block for ones that got zero notes
+    # this run), so a note reclassified elsewhere is removed from its former MOC
+    # instead of being left dangling in two MOCs (audit finding M-J). Otherwise
+    # write_mocs only rewrites MOCs that received >=1 note this run.
+    targets = dict(by_moc)
+    for m in (all_mocs or []):
+        targets.setdefault(m, [])
+    for moc_name, entries in sorted(targets.items()):
         if moc_name == "Unsorted":
             continue  # surfaced in the report, not written to a MOC
         path = moc_dir / f"{moc_name}.md"
@@ -585,7 +593,7 @@ def main() -> int:
         if not by_moc.get("Unsorted"):
             by_moc.pop("Unsorted", None)
 
-        write_mocs(vault, by_moc, apply)
+        write_mocs(vault, by_moc, apply, all_mocs=mocs)
         if args.tag_notes:
             tag_notes(vault, results, apply)
 
