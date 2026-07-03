@@ -240,6 +240,19 @@ def classify_note(
 # ----------------------------------------------------------------------------
 # Writing MOC files
 # ----------------------------------------------------------------------------
+# The managed blocks carry a minute-resolution "*Updated <ts> by moc_linker*"
+# stamp that changes every run. Comparing note content with the stamp lines
+# stripped lets an idempotent night detect "nothing but the timestamp would
+# change" and skip the write, so unchanged notes don't have their mtime bumped
+# every night — which otherwise defeats the ledger's recency filter and forces a
+# full whole-vault re-embed (audit finding H-B).
+_STAMP_RE = re.compile(r"^\*Updated .* by moc_linker.*\*\s*$", re.M)
+
+
+def _without_stamps(text: str) -> str:
+    return _STAMP_RE.sub("", text)
+
+
 def render_managed_block(entries: list[dict]) -> str:
     lines = [MANAGED_BEGIN, f"*Updated {datetime.now():%Y-%m-%d %H:%M} by moc_linker.*", ""]
     for e in sorted(entries, key=lambda x: x["title"].lower()):
@@ -298,6 +311,9 @@ def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
         new_content = upsert_managed_block(existing, block, moc_name)
         print(f"\n=== {moc_name}.md ({len(entries)} notes) ===")
         if apply:
+            if _without_stamps(new_content) == _without_stamps(existing):
+                print(f"  unchanged, skipped {path.relative_to(vault)}")  # H-B: no mtime churn
+                continue
             b = backup_file(path, backup_dir)
             if b:
                 print(f"  backed up -> {b}")
@@ -329,6 +345,8 @@ def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
         else:
             new_text = f"---\nmoc: {link}\n---\n\n{text}"
         if apply:
+            if new_text == text:
+                continue  # moc: already correct; skip to avoid mtime churn (H-B)
             backup_dir.mkdir(parents=True, exist_ok=True)
             (backup_dir / f"{path.stem}.bak.md").write_text(text, encoding="utf-8")
             path.write_text(new_text, encoding="utf-8")
@@ -413,6 +431,8 @@ def cross_link(notes: list[dict], endpoint: str, model: str, top_k: int,
         original = path.read_text(encoding="utf-8")
         new_text = upsert_related_block(original, block)
         if apply:
+            if _without_stamps(new_text) == _without_stamps(original):
+                continue  # same neighbors; only the stamp differs — skip (H-B)
             # backups live OUTSIDE the vault so Obsidian never indexes them
             bdir = _related_backup_dir(note)
             bdir.mkdir(parents=True, exist_ok=True)

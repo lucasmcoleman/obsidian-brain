@@ -5,8 +5,18 @@ into `re.sub` as the *replacement* string, where backslash escapes and group
 references (`\\1`, `\\g<..>`) are interpreted — so a Windows path or a stray
 backslash in a note summary either crashes the nightly linker (invalid group
 reference) or silently mangles the MOC file (\\n/\\t become real whitespace).
+
+Also covers the H-B finding: the nightly write paths (write_mocs / tag_notes /
+cross_link) must NOT rewrite a note when nothing but the managed-block timestamp
+would change, so an idempotent night doesn't bump every note's mtime (which
+defeats the ledger's recency filter and forces a full whole-vault re-embed).
 """
+import os
+
 import moc_linker as ml
+from conftest import write_note
+
+OLD_MTIME = 1_000_000  # a fixed past mtime; an unchanged file must keep it
 
 
 def _managed(existing_body_desc):
@@ -40,3 +50,50 @@ def test_upsert_related_block_backslash_in_desc_does_not_crash():
     block = ml.render_related_block([{"title": "Other", "desc": r"ref \1 path C:\x\1"}])
     out = ml.upsert_related_block(text, block)  # must not raise
     assert r"C:\x\1" in out
+
+
+# ── H-B: idempotent nights must not rewrite unchanged notes (no mtime churn) ────
+def test_tag_notes_skips_write_when_moc_already_present(vault):
+    note = write_note(vault, "n.md", "# Note\n\nbody\n")
+    results = [{"moc": "Work MOC", "abs": note, "rel": "n.md"}]
+    ml.tag_notes(vault, results, apply=True)  # first run stamps moc: frontmatter
+    first = note.read_text(encoding="utf-8")
+
+    os.utime(note, (OLD_MTIME, OLD_MTIME))
+    ml.tag_notes(vault, results, apply=True)  # second run is a no-op
+
+    assert note.stat().st_mtime == OLD_MTIME  # not rewritten
+    assert note.read_text(encoding="utf-8") == first
+
+
+def test_write_mocs_skips_write_when_only_timestamp_would_change(vault):
+    moc_dir = vault / ml.MOC_SUBDIR
+    moc_dir.mkdir(parents=True)
+    by_moc = {"Work MOC": [{"title": "Alpha", "desc": "a note about alpha"}]}
+    ml.write_mocs(vault, by_moc, apply=True)
+    path = moc_dir / "Work MOC.md"
+
+    os.utime(path, (OLD_MTIME, OLD_MTIME))
+    ml.write_mocs(vault, by_moc, apply=True)  # same entries → only the stamp differs
+
+    assert path.stat().st_mtime == OLD_MTIME  # skipped despite the volatile timestamp
+
+
+def test_cross_link_skips_write_when_neighbors_unchanged(vault, monkeypatch):
+    a = write_note(vault, "a.md", "# Alpha\n\nalpha body here\n")
+    b = write_note(vault, "b.md", "# Beta\n\nbeta body here\n")
+    notes = [
+        {"title": "Alpha", "rel": "a.md", "abs": a, "body": "alpha body here"},
+        {"title": "Beta", "rel": "b.md", "abs": b, "body": "beta body here"},
+    ]
+    # Deterministic, distinct vectors so each note has the other as a neighbor.
+    monkeypatch.setattr(ml, "embed_text",
+                        lambda text, *a, **k: [float(len(text)), 1.0, 0.5])
+    ml.cross_link(notes, "http://x", "m", 5, 10, 1, apply=True)
+
+    for p in (a, b):
+        os.utime(p, (OLD_MTIME, OLD_MTIME))
+    ml.cross_link(notes, "http://x", "m", 5, 10, 1, apply=True)  # same neighbors
+
+    assert a.stat().st_mtime == OLD_MTIME
+    assert b.stat().st_mtime == OLD_MTIME
