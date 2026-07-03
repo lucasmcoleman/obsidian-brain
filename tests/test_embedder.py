@@ -11,7 +11,10 @@ class _FakeEmb:
 
 class _FakeResp:
     def __init__(self, vecs):
+        # Real embeddings responses carry a per-item `index`; model it in order.
         self.data = [_FakeEmb(v) for v in vecs]
+        for i, item in enumerate(self.data):
+            item.index = i
 
 
 class FakeClient:
@@ -80,6 +83,34 @@ def test_empty_input_makes_no_calls(monkeypatch):
 
     assert embedder.embed_texts([]) == []
     assert fake.calls == []
+
+
+class _ShuffledResp:
+    """A response whose .data is returned OUT of input order, each item carrying
+    the correct OpenAI `index` field — exactly what a client must sort by."""
+    def __init__(self, vecs):
+        items = [_FakeEmb(v) for v in vecs]
+        for i, it in enumerate(items):
+            it.index = i
+        # Return them reversed to simulate an out-of-order endpoint response.
+        self.data = list(reversed(items))
+
+
+def test_reorders_response_data_by_index(monkeypatch):
+    class ShufflingClient:
+        def __init__(self):
+            self.embeddings = self
+
+        def create(self, model, input):
+            # Encode input order in the vector so a mispairing is detectable.
+            return _ShuffledResp([[float(i)] for i in range(len(input))])
+
+    monkeypatch.setattr(embedder, "get_client", lambda: ShufflingClient())
+
+    out = embedder.embed_texts(["a", "b", "c", "d"], batch_size=8)
+
+    # Must be restored to input order via the `index` field, not left reversed.
+    assert [v[0] for v in out] == [0.0, 1.0, 2.0, 3.0]
 
 
 def test_client_configured_with_timeout(monkeypatch):

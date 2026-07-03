@@ -42,7 +42,12 @@ def _embed_one_batch(batch: list[str], max_retries: int) -> list[list[float]]:
     for attempt in range(max_retries):
         try:
             response = client.embeddings.create(model=EMBEDDING_MODEL, input=batch)
-            return [item.embedding for item in response.data]
+            # The embeddings API does not guarantee response order; the per-item
+            # `index` field exists precisely so clients can restore input order.
+            # Sorting defensively prevents silently pairing a chunk's text with a
+            # different chunk's vector if the endpoint ever reorders (finding M-F).
+            data = sorted(response.data, key=lambda item: item.index)
+            return [item.embedding for item in data]
         except Exception as e:  # noqa: BLE001 — endpoint errors are heterogeneous
             last_exc = e
             if attempt < max_retries - 1:
