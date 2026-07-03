@@ -65,9 +65,24 @@ def find_json_object(text: str):
     start = text.find("{")
     while start != -1:
         depth = 0
+        in_str = False
+        esc = False
         for i in range(start, len(text)):
             c = text[i]
-            if c == "{":
+            # Track JSON string state so a brace inside a quoted value (e.g. a
+            # stray '}' in an evidence quote) can't drive depth to zero early and
+            # truncate the object, dropping the whole night's update (finding H-2).
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
                 depth += 1
             elif c == "}":
                 depth -= 1

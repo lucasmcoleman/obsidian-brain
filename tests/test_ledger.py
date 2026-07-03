@@ -21,6 +21,16 @@ def test_find_json_object_handles_single_object():
     assert obj["new_items"] == [{"text": "x"}]
 
 
+def test_find_json_object_handles_brace_inside_string_value():
+    # A stray '}' inside a quoted evidence value must not truncate the object
+    # early and drop the whole night's ledger update (audit finding H-2).
+    text = ('{"completed": [{"n": 1, "evidence": "see note re: cost } overrun fixed"}], '
+            '"new_items": []}')
+    obj = lu.find_json_object(text)
+    assert obj is not None
+    assert obj["completed"][0]["n"] == 1
+
+
 # ── byte-slice fix: robust auto-block extraction even with trailing content ─────
 def test_extract_auto_block_with_trailing_curated_content():
     body = (
