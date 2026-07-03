@@ -247,6 +247,25 @@ def _truthy(name: str, default: str) -> bool:
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "on")
 
 
+def _parse_hour(raw, default: int = 3) -> int:
+    """Parse BRAIN_REFRESH_AT_HOUR into a legal 0-23 hour, falling back with a
+    logged warning on a non-numeric or out-of-range value. Without this an input
+    like "24"/"3am" passed int() (or crashed it) and then raised inside
+    datetime.replace(hour=..) on the first loop iteration, silently killing the
+    scheduler thread while /health kept returning 200 (audit finding M-O)."""
+    try:
+        hour = int(raw)
+    except (TypeError, ValueError):
+        print(f"[refresh] WARNING: BRAIN_REFRESH_AT_HOUR={raw!r} is not an integer; "
+              f"using {default}", flush=True)
+        return default
+    if not 0 <= hour <= 23:
+        print(f"[refresh] WARNING: BRAIN_REFRESH_AT_HOUR={raw!r} is out of range 0-23; "
+              f"using {default}", flush=True)
+        return default
+    return hour
+
+
 def _seconds_until_hour(hour: int) -> float:
     now = datetime.now()
     target = now.replace(hour=hour, minute=0, second=0, microsecond=0)
@@ -316,16 +335,23 @@ def _refresh_loop(hour: int, force: bool, on_start: bool) -> None:
         if _truthy("BRAIN_POSTREFRESH_ON_START", "0"):
             _post_refresh_tasks()  # heavy (~minutes); off by default, on for the nightly run
     while True:
-        time.sleep(_seconds_until_hour(hour))
-        _refresh_once(force=force)
-        _post_refresh_tasks()
+        # Guard the whole iteration: no single failure (a bad sleep interval, an
+        # unguarded call added later) may kill the daemon thread — there is no
+        # watchdog to restart it (audit findings M-O / M-6).
+        try:
+            time.sleep(_seconds_until_hour(hour))
+            _refresh_once(force=force)
+            _post_refresh_tasks()
+        except Exception as e:
+            print(f"[refresh] loop iteration error (continuing): {e}", flush=True)
+            time.sleep(60)  # avoid a hot spin if the failure recurs immediately
 
 
 def _maybe_start_scheduler() -> None:
     if not _truthy("BRAIN_REFRESH_ENABLED", "1"):
         print("[refresh] scheduler disabled", flush=True)
         return
-    hour = int(os.environ.get("BRAIN_REFRESH_AT_HOUR", "3"))
+    hour = _parse_hour(os.environ.get("BRAIN_REFRESH_AT_HOUR", "3"))
     force = _truthy("BRAIN_REFRESH_FORCE", "0")
     on_start = _truthy("BRAIN_REFRESH_ON_START", "1")
     threading.Thread(
