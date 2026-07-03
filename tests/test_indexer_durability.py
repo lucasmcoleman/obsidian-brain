@@ -114,6 +114,44 @@ def test_incremental_build_rebuilds_on_index_metadata_count_mismatch(brain_paths
     assert result["status"] == "built"
 
 
+def test_incremental_build_rebuilds_on_embedding_model_change(brain_paths, make_note, fake_embed, monkeypatch):
+    # Swapping to a different (same-dim) embedding model without --force must
+    # rebuild, not keep serving the stale-model index (audit finding M-L).
+    make_note("a.md", "Alpha content about apples.")
+    indexer.build_index(force=True)
+
+    monkeypatch.setattr(indexer, "EMBEDDING_MODEL", "some-other-embedding-model")
+    result = indexer.build_index(force=False)
+    assert result["status"] == "built"
+
+
+def test_incremental_build_rebuilds_on_chunk_size_change(brain_paths, make_note, fake_embed, monkeypatch):
+    make_note("a.md", "Alpha content about apples.")
+    indexer.build_index(force=True)
+
+    monkeypatch.setattr(indexer, "CHUNK_SIZE", 123)
+    result = indexer.build_index(force=False)
+    assert result["status"] == "built"
+
+
+def test_incremental_build_rebuilds_on_doc_prefix_change(brain_paths, make_note, fake_embed, monkeypatch):
+    # Changing the nomic doc prefix changes the embeddings → must reindex (M-A/M-L).
+    make_note("a.md", "Alpha content about apples.")
+    indexer.build_index(force=True)
+
+    monkeypatch.setattr(indexer, "EMBED_DOC_PREFIX", "different_prefix: ")
+    result = indexer.build_index(force=False)
+    assert result["status"] == "built"
+
+
+def test_incremental_build_stays_current_when_params_unchanged(brain_paths, make_note, fake_embed):
+    make_note("a.md", "Alpha content about apples.")
+    indexer.build_index(force=True)
+
+    result = indexer.build_index(force=False)
+    assert result["status"] == "already_current"  # params match → no needless re-embed
+
+
 def test_cleanup_removes_leftover_tmp_files(brain_paths):
     brain_dir = brain_paths["brain_dir"]
     brain_dir.mkdir(parents=True, exist_ok=True)

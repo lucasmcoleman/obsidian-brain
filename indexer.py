@@ -69,6 +69,20 @@ def _build_lock():
             f.close()
 
 
+def _index_params() -> dict[str, Any]:
+    """The index-defining parameters that, if changed, invalidate an existing
+    index even when the vault files are untouched. Folded into the freshness
+    decision so a same-dimension model swap, a CHUNK_SIZE/OVERLAP change, or a
+    change to the nomic embedding prefix triggers a rebuild instead of silently
+    serving a stale-model / stale-chunking index (audit finding M-L)."""
+    return {
+        "embedding_model": EMBEDDING_MODEL,
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "doc_prefix": EMBED_DOC_PREFIX,
+    }
+
+
 def _index_is_consistent(existing_meta: dict[str, Any]) -> bool:
     """True only if index.faiss is loadable AND its row count matches the metadata
     chunk count. A signature match alone does not prove the on-disk index is usable
@@ -190,8 +204,9 @@ def build_index(force: bool = False) -> dict[str, Any]:
             current_sig = _vault_signature(notes)
             # Rebuild if the file SET or any mtime changed (catches deletions and
             # renames, which a max-mtime check alone misses — audit finding M7).
+            params_match = existing_meta.get("index_params") == _index_params()
             if (existing_sig is not None and existing_sig == current_sig
-                    and _index_is_consistent(existing_meta)):
+                    and params_match and _index_is_consistent(existing_meta)):
                 return {
                     "status": "already_current",
                     "notes": existing_meta.get("num_notes", len(notes)),
@@ -236,6 +251,9 @@ def build_index(force: bool = False) -> dict[str, Any]:
         "num_notes": len(notes),
         "num_chunks": len(all_chunks),
         "embedding_model": EMBEDDING_MODEL,
+        # Index-defining params; compared on the incremental path so a model/chunk/
+        # prefix change forces a rebuild even with an unchanged vault (M-L).
+        "index_params": _index_params(),
     }
 
     # Hold a cross-process lock around the swap so a manual build can't interleave
