@@ -254,6 +254,22 @@ def chunk_text(text: str, max_tokens: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
 _MANAGED_BLOCK_RE = re.compile(r"<!--\s*moc-linker:.*?:end\s*-->", re.S)
 
 
+# Frontmatter keys projected into chunk metadata for truth-maintenance Layer 4
+# (searcher down-weights + annotates on these; see truth_maintenance.py).
+_TRUTH_KEYS = ("review_status", "superseded_by", "source_type")
+
+
+def _parse_truth_frontmatter(raw_fm: str) -> dict[str, str]:
+    """Loose stdlib parse of the truth-status keys from a frontmatter block."""
+    out = {k: "" for k in _TRUTH_KEYS}
+    for line in raw_fm.splitlines():
+        k, sep, v = line.partition(":")
+        k = k.strip()
+        if sep and k in out:
+            out[k] = v.strip().strip('"').strip("'")
+    return out
+
+
 def scan_vault(vault_path: str) -> list[dict[str, Any]]:
     """
     Walk the vault and return all markdown notes with their content.
@@ -271,10 +287,13 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
             continue
         try:
             content = md_file.read_text(encoding="utf-8")
-            # Strip Obsidian metadata frontmatter
+            # Strip Obsidian metadata frontmatter (but first lift the truth-status
+            # keys out of it — Layer 4 of truth maintenance).
+            truth = {k: "" for k in _TRUTH_KEYS}
             if content.startswith("---"):
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
+                    truth = _parse_truth_frontmatter(parts[1])
                     content = parts[2].strip()
             # Strip the linker's managed blocks so generated link boilerplate is
             # never re-embedded (M-E).
@@ -288,6 +307,7 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
                 "abs_path": str(md_file),
                 "content": content,
                 "mtime": os.path.getmtime(md_file),
+                "truth": truth,
             })
         except (OSError, UnicodeDecodeError) as e:
             # Don't silently drop notes — a consistently-failing note should be
@@ -332,12 +352,17 @@ def build_index(force: bool = False) -> dict[str, Any]:
     all_chunks = []
     for note in notes:
         chunks = chunk_text(note["content"])
+        truth = note.get("truth") or {}
         for chunk in chunks:
             all_chunks.append({
                 "text": chunk["text"],
                 "note_path": note["path"],
                 "abs_path": note["abs_path"],
                 "mtime": note["mtime"],
+                # Truth-status projection (Layer 4): O(1) signal for the searcher.
+                "review_status": truth.get("review_status", ""),
+                "superseded_by": truth.get("superseded_by", ""),
+                "source_type": truth.get("source_type", ""),
             })
 
     print(f"Created {len(all_chunks)} chunks")

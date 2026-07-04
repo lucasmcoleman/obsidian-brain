@@ -13,7 +13,22 @@ import numpy as np
 from config import (
     VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K, EMBED_QUERY_PREFIX,
     SEARCH_MAX_TOP_K, SEARCH_MAX_QUERY_CHARS, SEARCH_MIN_SCORE,
+    TRUTH_WEIGHT_SUPERSEDED, TRUTH_WEIGHT_CONTESTED, TRUTH_WEIGHT_UNREVIEWED,
 )
+
+
+def _truth_multiplier(chunk: dict) -> float:
+    """Truth-maintenance Layer 4: down-weight superseded/contested/raw-import
+    chunks so full-weight sources rank first — but never drop them (a stale sole
+    source still beats nothing; the ⚠ annotation is what warns the agent)."""
+    status = chunk.get("review_status", "")
+    if status == "superseded" or chunk.get("superseded_by"):
+        return TRUTH_WEIGHT_SUPERSEDED
+    if status == "contested":
+        return TRUTH_WEIGHT_CONTESTED
+    if status == "unreviewed" and chunk.get("source_type") in ("transcript", "ocr"):
+        return TRUTH_WEIGHT_UNREVIEWED
+    return 1.0
 from embedder import embed_query
 from indexer import INDEX_LOCK
 
@@ -112,7 +127,7 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         # L2 distance to a monotonic similarity score. Cast to a native float:
         # FAISS distances are numpy.float32, which is not JSON-serializable and
         # would 500 any JSON consumer (e.g. the /ui/api/search route).
-        score = round(float(1 / (1 + dist)), 4)
+        score = round(float(1 / (1 + dist)) * _truth_multiplier(chunk), 4)
         if SEARCH_MIN_SCORE > 0 and score < SEARCH_MIN_SCORE:
             continue  # relevance floor (opt-in; 0 = keep all) — low-5
         results.append({
@@ -120,9 +135,16 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
             "note_path": chunk["note_path"],
             "abs_path": chunk["abs_path"],
             "score": score,
+            "review_status": chunk.get("review_status", ""),
+            "superseded_by": chunk.get("superseded_by", ""),
+            "source_type": chunk.get("source_type", ""),
         })
 
-    # Results are already in FAISS L2 order; deduplicate to one chunk per note.
+    # The truth multiplier can reorder relative to raw FAISS distance, so re-sort
+    # by adjusted score (stable: ties keep FAISS order) before deduping.
+    results.sort(key=lambda r: r["score"], reverse=True)
+
+    # Deduplicate to one chunk per note.
     seen_notes = set()
     deduped = []
     for r in results:
@@ -142,7 +164,17 @@ def format_results(results: list[dict], query: str) -> str:
 
     lines = [f"## Relevant notes for: {query}\n"]
     for i, r in enumerate(results, 1):
-        lines.append(f"### {i}. {r['note_path']} (score: {r['score']})")
+        # Layer 4's load-bearing line: the agent that would compound a stale claim
+        # is the one that must SEE the flag — down-weighting alone is not enough.
+        flag = ""
+        status = r.get("review_status", "")
+        if status == "superseded" or r.get("superseded_by"):
+            flag = f"  ⚠️ SUPERSEDED → {r.get('superseded_by') or 'a newer note'} (do not cite as current)"
+        elif status == "contested":
+            flag = "  ⚠️ CONTESTED (conflicting claims exist — check the review queue)"
+        elif status == "unreviewed" and r.get("source_type") in ("transcript", "ocr"):
+            flag = f"  ⚠️ UNREVIEWED {r['source_type'].upper()} (raw import, may contain errors)"
+        lines.append(f"### {i}. {r['note_path']} (score: {r['score']}){flag}")
         lines.append(f"```\n{r['text'][:500]}{'...' if len(r['text']) > 500 else ''}\n```")
         lines.append("")
 

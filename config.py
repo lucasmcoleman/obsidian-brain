@@ -25,6 +25,14 @@ TOP_K = 5  # number of chunks to retrieve
 EMBED_DOC_PREFIX = os.environ.get("EMBED_DOC_PREFIX", "search_document: ")
 EMBED_QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", "search_query: ")
 
+# Truth-maintenance retrieval weights (design: layered defense, Layer 4). Applied
+# as score multipliers at search time so stale/contested/raw notes rank below
+# full-weight sources but are NEVER dropped — a stale sole source still beats
+# nothing, and the ⚠ annotation (format_results) is what stops an agent citing it.
+TRUTH_WEIGHT_SUPERSEDED = float(os.environ.get("TRUTH_WEIGHT_SUPERSEDED", "0.4"))
+TRUTH_WEIGHT_CONTESTED = float(os.environ.get("TRUTH_WEIGHT_CONTESTED", "0.7"))
+TRUTH_WEIGHT_UNREVIEWED = float(os.environ.get("TRUTH_WEIGHT_UNREVIEWED", "0.6"))
+
 # Search argument hardening + quality knobs (audit findings low-9 / low-5).
 SEARCH_MAX_TOP_K = int(os.environ.get("SEARCH_MAX_TOP_K", "100"))       # clamp absurd/negative top_k
 SEARCH_MAX_QUERY_CHARS = int(os.environ.get("SEARCH_MAX_QUERY_CHARS", "4000"))  # bound query size
