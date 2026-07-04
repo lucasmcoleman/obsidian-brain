@@ -38,3 +38,12 @@ def test_ui_search_empty_query_returns_empty(monkeypatch):
     r = c.get("/ui/api/search?q=", headers={"Authorization": "Bearer tok"})
     assert r.status_code == 200
     assert r.json() == {"results": []}
+
+
+def test_refresh_requires_token_and_runs_build(monkeypatch):
+    c = _client(monkeypatch, token="tok")
+    assert c.post("/refresh").status_code == 401  # gated like every non-/health route
+    monkeypatch.setattr(mcp_server, "build_index", lambda force=False: {"status": "already_current"})
+    r = c.post("/refresh", headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "already_current"

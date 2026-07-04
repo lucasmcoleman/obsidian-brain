@@ -457,6 +457,16 @@ async def ui_insight(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+@mcp.custom_route("/refresh", methods=["POST"])
+async def http_refresh(_request: Request) -> JSONResponse:
+    """Trigger an incremental index rebuild (roadmap #2). Gated by the same bearer
+    auth as every non-/health route. Cheap now that embeddings are content-cached:
+    a vault writer can hit this after a write instead of waiting for the nightly
+    refresh. Reuses build_index's lock + atomic swap, off the event loop."""
+    result = await run_in_threadpool(build_index, False)
+    return JSONResponse(result)
+
+
 def _resolve_transport() -> str:
     if "--http" in sys.argv:
         return "streamable-http"
