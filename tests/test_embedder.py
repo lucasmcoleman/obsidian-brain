@@ -113,6 +113,29 @@ def test_reorders_response_data_by_index(monkeypatch):
     assert [v[0] for v in out] == [0.0, 1.0, 2.0, 3.0]
 
 
+def test_embed_texts_clamps_oversized_input(monkeypatch):
+    # Endpoints can REJECT over-context input with HTTP 400 (measured on LM Studio
+    # + Qwen3-Embedding) — one rejected batch would abort the whole build. Inputs
+    # must be clamped to EMBED_MAX_INPUT_CHARS before sending.
+    captured = {}
+
+    class Client:
+        def __init__(self):
+            self.embeddings = self
+
+        def create(self, model, input):
+            captured["lens"] = [len(t) for t in input]
+            return _FakeResp([[0.0]] * len(input))
+
+    monkeypatch.setattr(embedder, "get_client", lambda: Client())
+    monkeypatch.setattr(embedder, "EMBED_MAX_INPUT_CHARS", 100)
+
+    embedder.embed_texts(["short", "x" * 5000], batch_size=8)
+
+    assert captured["lens"][0] == len("short")
+    assert captured["lens"][1] == 100  # clamped, not sent oversized
+
+
 def test_client_configured_with_timeout(monkeypatch):
     captured = {}
 

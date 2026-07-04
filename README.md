@@ -141,7 +141,7 @@ The implicit contract: **FAISS row `i` corresponds positionally to `metadata["ch
 
 | File | Responsibility |
 |------|----------------|
-| `config.py` | Central paths + model constants. Reads **only** `OBSIDIAN_VAULT_PATH` from the environment; everything else (`LM_BASE_URL`, `EMBEDDING_MODEL`, `CHUNK_SIZE`, `CHUNK_OVERLAP`, `TOP_K`) is a hardcoded literal. |
+| `config.py` | Central paths + model settings. `OBSIDIAN_VAULT_PATH`, `LM_BASE_URL`, and `EMBEDDING_MODEL` are env-driven (the deploy compose sets them); embedding instruction prefixes default per model family (`_default_prefixes`: nomic `search_document:`/`search_query:`, Qwen3-Embedding raw docs + `Instruct:`/`Query:` template) with `EMBED_DOC_PREFIX`/`EMBED_QUERY_PREFIX` env overrides. `CHUNK_SIZE`/`CHUNK_OVERLAP`/`TOP_K` remain code constants. |
 | `embedder.py` | Lazily-memoized `OpenAI` client pointed at `LM_BASE_URL` (`api_key="not-required"`, explicit `EMBED_TIMEOUT`). `embed_texts(list)` embeds in `EMBED_BATCH_SIZE` batches with per-batch backoff retry (`EMBED_MAX_RETRIES`); `embed_query(str)` is a single-string wrapper. |
 | `indexer.py` | `scan_vault`, `chunk_text`, `build_index(force=False)`, `ensure_dirs`. Owns `INDEX_LOCK` (a `threading.RLock`) and the atomic index/metadata swap. CLI: `python3 indexer.py [--force]`. |
 | `searcher.py` | `search(query, top_k)` (kNN + note-dedup) and `format_results`. Imports `INDEX_LOCK` from `indexer` to share the in-process lock. CLI: `python3 searcher.py <query…>`. |
@@ -228,7 +228,7 @@ python -m pytest tests/ -q
 There is one environment variable that governs the **core** pipeline (`OBSIDIAN_VAULT_PATH`); the remaining knobs are split between the MCP server's runtime/scheduler behavior and the maintenance subprocesses.
 
 > ### ⚠️ Important: `LM_BASE_URL` and `EMBEDDING_MODEL` are *not* env-configurable for the core path
-> In `config.py`, `LM_BASE_URL` and `EMBEDDING_MODEL` are **hardcoded literals**. Setting these as environment variables (as the deploy compose file does) only affects the maintenance subprocesses in `mcp_server._post_refresh_tasks`. The embeddings used by `brain_query`, `brain_build_index`, and reported by `brain_status` always use the baked-in `config.py` values. **To change the core embeddings endpoint or model, edit `config.py`.**
+> `LM_BASE_URL` and `EMBEDDING_MODEL` are now env-driven for the **core** path too (closing the old M-10/H7 drift): set them in the compose and both `brain_query`/`brain_build_index` *and* the maintenance subprocesses use them. Changing `EMBEDDING_MODEL` (or a prefix) automatically triggers a full reindex on the next build via the stored `index_params`.
 
 ### Core pipeline (`config.py`)
 
@@ -487,7 +487,7 @@ The index file-swap during `build_index` is locked via `indexer.INDEX_LOCK`, so 
 | Build hangs or errors on `Generating embeddings…` | The LM Studio embeddings endpoint at `config.LM_BASE_URL` (`http://192.168.0.29:1234/v1`) is unreachable or the model isn't loaded. Embeddings now retry with backoff and time out after `EMBED_TIMEOUT` (30s) per batch; a persistent failure aborts the build but leaves the previous index intact. |
 | A deleted/renamed note still appears in search results | Should self-correct: the freshness check is `vault_signature`-based and rebuilds on any set change. If results still look stale, force a rebuild: `python3 indexer.py --force` or `brain_build_index(force=true)`. |
 | HTTP tool calls return `401` | The server has `BRAIN_AUTH_TOKEN` set; send `Authorization: Bearer <token>`. `GET /health` is exempt. |
-| Changed `LM_BASE_URL`/`EMBEDDING_MODEL` env vars but core search still hits the old endpoint/model | These are **hardcoded in `config.py`** for the core path — env vars only affect the maintenance subprocesses. Edit `config.py` and rebuild. |
+| Changed `LM_BASE_URL`/`EMBEDDING_MODEL` env vars but results look stale | The next `build_index` call detects the changed `index_params` and does a full reindex automatically; trigger it with `POST /refresh` or `brain_build_index` rather than waiting for the nightly run. |
 | `brain_status` reports a different `embedding_model` than expected | `metadata.json` records the model used at build time; if you changed the model in `config.py`, rebuild with `--force` (search does not validate the model match). |
 | `consolidate.py` exits immediately with `ERROR: OBSIDIAN_VAULT_PATH not set` | It hard-requires the env var even though `config.py` has a default. Set `OBSIDIAN_VAULT_PATH`. |
 | `brain_complete_task` returns `ambiguous` or `error` and writes nothing | The `match` substring must identify exactly one open task in the note. Make it more specific. |

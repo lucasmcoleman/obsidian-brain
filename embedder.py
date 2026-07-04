@@ -15,6 +15,7 @@ from config import (
     EMBED_BATCH_SIZE,
     EMBED_TIMEOUT,
     EMBED_MAX_RETRIES,
+    EMBED_MAX_INPUT_CHARS,
 )
 
 _client = None
@@ -68,6 +69,23 @@ def embed_texts(
         return []
     batch_size = batch_size or EMBED_BATCH_SIZE
     max_retries = max_retries if max_retries is not None else EMBED_MAX_RETRIES
+
+    # Clamp each input: some endpoints reject over-context input with HTTP 400
+    # instead of truncating, and one rejected item fails its whole batch — which
+    # would abort the entire index build. Truncating a pathological input is the
+    # lesser evil; log so it's visible rather than silent.
+    clamped = 0
+    bounded = []
+    for t in texts:
+        if len(t) > EMBED_MAX_INPUT_CHARS:
+            clamped += 1
+            t = t[:EMBED_MAX_INPUT_CHARS]
+        bounded.append(t)
+    if clamped:
+        import sys
+        print(f"[embedder] clamped {clamped} input(s) to EMBED_MAX_INPUT_CHARS="
+              f"{EMBED_MAX_INPUT_CHARS}", file=sys.stderr)
+    texts = bounded
 
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):

@@ -34,7 +34,10 @@ deployment is reproducible from the repo (the compose file itself lives outside 
     environment:
       - OBSIDIAN_VAULT_PATH=/vault
       - LM_BASE_URL=http://192.168.0.29:1234/v1
-      - EMBEDDING_MODEL=text-embedding-nomic-embed-text-v2-moe
+      # Qwen3-Embedding-8B (Q4, ~5GB, 4096-dim, MTEB ~70 vs nomic's ~62). config.py
+      # auto-selects the right instruction format per model family; changing the
+      # model triggers a full reindex automatically (index_params).
+      - EMBEDDING_MODEL=text-embedding-qwen3-embedding-8b
       # Require a bearer token on every HTTP request except /health (audit H-1).
       # Generate once: `openssl rand -hex 32`. Without it the tools are open.
       - BRAIN_AUTH_TOKEN=CHANGE_ME_openssl_rand_hex_32

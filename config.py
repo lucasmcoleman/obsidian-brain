@@ -10,20 +10,49 @@ INDEX_PATH = os.path.join(BRAIN_DIR, "index.faiss")
 METADATA_PATH = os.path.join(BRAIN_DIR, "metadata.json")
 ENTITIES_DIR = os.path.join(BRAIN_DIR, "entities")
 
-LM_BASE_URL = "http://192.168.0.29:1234/v1"
-EMBEDDING_MODEL = "text-embedding-nomic-embed-text-v2-moe"
+# Env-driven so the deploy compose (which already sets both) actually takes
+# effect for the CORE retrieval path too, not just the maintenance subprocesses
+# (closed July-1 finding M-10/H7 — these used to be hardcoded literals).
+LM_BASE_URL = os.environ.get("LM_BASE_URL", "http://192.168.0.29:1234/v1")
+EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "text-embedding-nomic-embed-text-v2-moe")
 CHUNK_SIZE = 500  # tokens per chunk
 CHUNK_OVERLAP = 50  # tokens overlap
 TOP_K = 5  # number of chunks to retrieve
 
-# nomic-embed-v2 is trained with task-instruction prefixes: indexed passages get
-# "search_document: " and queries get "search_query: ". Omitting them discards the
-# query/document asymmetry the model was tuned for (audit finding M-A). Applied to
-# the embedding INPUT only; stored chunk text stays clean. Env-overridable (set to
-# "" for a model that does not use prefixes) — changing them changes the index, so
-# they participate in the freshness/rebuild decision (see indexer._index_params).
-EMBED_DOC_PREFIX = os.environ.get("EMBED_DOC_PREFIX", "search_document: ")
-EMBED_QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", "search_query: ")
+
+def _default_prefixes(model: str) -> tuple[str, str]:
+    """(doc_prefix, query_prefix) for the given embedding model family.
+
+    Every family wants a DIFFERENT instruction format, and applying the wrong one
+    silently degrades retrieval (the M-A lesson):
+    - nomic-embed: "search_document: " on passages, "search_query: " on queries.
+    - Qwen3-Embedding: documents RAW; the query wrapped in an Instruct/Query
+      template (measured on the live endpoint: the template widens the
+      relevant-vs-irrelevant cosine gap vs a raw query).
+    - unknown models: no prefixes — safer than guessing another family's format.
+    """
+    m = model.lower()
+    if "qwen3-embedding" in m:
+        return ("", "Instruct: Given a search query, retrieve relevant passages "
+                    "from the user's notes\nQuery: ")
+    if "nomic-embed" in m:
+        return ("search_document: ", "search_query: ")
+    return ("", "")
+
+
+# Applied to the embedding INPUT only; stored chunk text stays clean. Env override
+# always wins — changing either changes the index, so they participate in the
+# freshness/rebuild decision (see indexer._index_params).
+_DOC_DEFAULT, _QUERY_DEFAULT = _default_prefixes(EMBEDDING_MODEL)
+EMBED_DOC_PREFIX = os.environ.get("EMBED_DOC_PREFIX", _DOC_DEFAULT)
+EMBED_QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", _QUERY_DEFAULT)
+
+# Hard per-input character clamp for embedding requests. Some endpoints REJECT
+# over-context input with HTTP 400 instead of truncating (measured: LM Studio +
+# Qwen3-Embedding-8B at its loaded context), and one rejected batch would abort
+# the whole index build. Chunks are far smaller than this; it only catches
+# pathological inputs. ~12000 chars ≈ 3000 tokens, under the ~4k loaded context.
+EMBED_MAX_INPUT_CHARS = int(os.environ.get("EMBED_MAX_INPUT_CHARS", "12000"))
 
 # Truth-maintenance retrieval weights (design: layered defense, Layer 4). Applied
 # as score multipliers at search time so stale/contested/raw notes rank below
