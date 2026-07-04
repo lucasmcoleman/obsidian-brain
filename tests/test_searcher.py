@@ -68,6 +68,17 @@ def test_search_caches_index_between_queries(brain_paths, make_note, fake_embed,
     assert any(r["note_path"] == "b.md" for r in res)
 
 
+def test_search_returns_empty_on_dimension_mismatch(brain_paths, make_note, fake_embed, monkeypatch):
+    # Query embedded at a different dimension than the stored index (mid-migration
+    # to a new embedding model, before the rebuild lands) must degrade to [] with
+    # a "rebuild needed" log — not crash with a bare faiss AssertionError (M-3).
+    make_note("a.md", "alpha content here.")
+    indexer.build_index(force=True)  # fake embedder → 8-dim index
+
+    monkeypatch.setattr(searcher, "embed_query", lambda t: [0.5] * 16)  # wrong dim
+    assert searcher.search("alpha") == []
+
+
 def test_search_results_are_json_serializable(brain_paths, make_note, fake_embed):
     import json
     make_note("a.md", "alpha content here about a topic.")

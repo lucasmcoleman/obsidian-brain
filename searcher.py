@@ -113,6 +113,16 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         return []
     query_vec = np.array([query_embedding]).astype("float32")
 
+    # Dimension guard (July-1 M-3): mid-migration to a new embedding model the
+    # query embeds at a different dimensionality than the stored index; faiss
+    # would raise a bare AssertionError. Degrade to [] and say why — the next
+    # build_index rebuilds automatically via the stored index_params (M-L).
+    if query_vec.shape[1] != index.d:
+        print(f"[searcher] query dim {query_vec.shape[1]} != index dim {index.d} — "
+              f"embedding model changed; rebuild needed (returning no results)",
+              file=sys.stderr)
+        return []
+
     # Retrieve a generous candidate pool so dedup-to-one-chunk-per-note can still
     # fill top_k even when several of the nearest chunks belong to one big note
     # (audit finding low-5).
