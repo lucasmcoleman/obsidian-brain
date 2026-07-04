@@ -39,3 +39,12 @@ def test_search_fills_top_k_across_distinct_notes(brain_paths, make_note, fake_e
     res = searcher.search("topic", top_k=5)
     assert len(res) == 5
     assert len({r["note_path"] for r in res}) == 5  # distinct notes
+
+
+def test_search_results_are_json_serializable(brain_paths, make_note, fake_embed):
+    import json
+    make_note("a.md", "alpha content here about a topic.")
+    indexer.build_index(force=True)
+    res = searcher.search("topic", top_k=3)
+    assert res and isinstance(res[0]["score"], float)  # native float, not numpy
+    json.dumps(res)  # must not raise (JSON consumers like /ui/api/search)

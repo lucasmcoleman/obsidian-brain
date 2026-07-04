@@ -88,15 +88,17 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         if idx == -1:
             continue
         chunk = chunks[idx]
-        # L2 distance to a monotonic similarity score
-        score = 1 / (1 + dist)
+        # L2 distance to a monotonic similarity score. Cast to a native float:
+        # FAISS distances are numpy.float32, which is not JSON-serializable and
+        # would 500 any JSON consumer (e.g. the /ui/api/search route).
+        score = round(float(1 / (1 + dist)), 4)
         if SEARCH_MIN_SCORE > 0 and score < SEARCH_MIN_SCORE:
             continue  # relevance floor (opt-in; 0 = keep all) — low-5
         results.append({
             "text": chunk["text"],
             "note_path": chunk["note_path"],
             "abs_path": chunk["abs_path"],
-            "score": round(score, 4),
+            "score": score,
         })
 
     # Results are already in FAISS L2 order; deduplicate to one chunk per note.
