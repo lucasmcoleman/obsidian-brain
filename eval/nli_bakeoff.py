@@ -30,18 +30,22 @@ LS = "http://192.168.0.29:4004/v1"     # llama-swap
 LM = "http://192.168.0.29:1234/v1"     # LM Studio
 
 # (label, endpoint, model-id-on-that-endpoint)
-# HARDWARE CEILING: this box is a unified-memory APU (~112 GB GTT) already ~48 GB
-# deep in resident AI models. Models > ~30B alongside the 8B embedder OOM/thrash
-# swap and time out — do NOT add them here. gpt-oss-120b (~60 GB) and minimax-139B
-# were tried once and filled swap; kept below only as a documented no-go.
+# NOTES for this box (Strix Halo APU, ~112 GB GTT):
+# - Run ONE model at a time (concurrent loads thrash swap; keep the box quiet).
+# - gpt-oss-120b: do NOT test via LM Studio (:1234) — its generic ROCm runtime
+#   HANGS this 120B MoE on the APU (prompt-processing stuck at ~0% GPU, CPU spins).
+#   The working path is the strix-halo-club custom FP4 llama.cpp build (docker), but
+#   it isn't exposed on the running llama-swap :4004 — wire it up before testing.
+# - Moot anyway: qwen3.6-27b already scored precision 1.00 / recall 1.00, so nothing
+#   can BEAT it on this set — a bigger model can only tie, slower.
 CANDIDATES = [
-    ("qwen3.6-27b",     LS, "unsloth/Qwen3.6-27B-MTP-GGUF"),      # dense 27B — NLI winner + ledger
+    ("qwen3.6-27b",     LS, "unsloth/Qwen3.6-27B-MTP-GGUF"),      # dense 27B — NLI winner + ledger/truth
     ("qwen3.6-35b-a3b", LS, "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"),  # prior default (3B active)
-    ("step-3.7-flash",  LS, "unsloth/Step-3.7-Flash-GGUF"),       # flash — fits
+    ("step-3.7-flash",  LS, "unsloth/Step-3.7-Flash-GGUF"),       # flash — DNF (no usable JSON)
 ]
-# Do NOT enable without freeing memory first — these OOM/thrash swap here:
+# Reachable via --only, but see notes above before using:
 _TOO_BIG = [
-    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # ~60 GB
+    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # hangs on LM Studio's runtime here
     ("minimax-m2.7",    LS, "mradermacher/m51Lab-MiniMax-M2.7-REAP-139B-A10B-i1-GGUF"),  # 139B
 ]
 
