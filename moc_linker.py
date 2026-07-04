@@ -301,11 +301,19 @@ def upsert_managed_block(existing: str, block: str, title: str) -> str:
     pattern = re.compile(
         re.escape(MANAGED_BEGIN) + r".*?" + re.escape(MANAGED_END), flags=re.S
     )
+    if len(pattern.findall(existing)) > 1:
+        # More than one managed pair (a LiveSync conflict merge, or a note that
+        # quotes the markers) — replacing all would destroy the extra content.
+        # Refuse and leave it for a human (audit finding low-7).
+        print("[moc_linker] multiple managed blocks found; skipping to avoid data loss",
+              file=sys.stderr)
+        return existing
     if pattern.search(existing):
         # `block` carries model-generated desc/titles; pass it as a function
         # replacement so backslashes / \1 group-refs are inserted verbatim
-        # rather than interpreted as a re.sub template (audit finding H-A).
-        return pattern.sub(lambda _m: block, existing).rstrip() + "\n"
+        # rather than interpreted as a re.sub template (audit finding H-A). count=1
+        # so only the single managed pair is touched.
+        return pattern.sub(lambda _m: block, existing, count=1).rstrip() + "\n"
     header = existing.strip()
     if not header:
         header = f"# {title}"
@@ -466,10 +474,17 @@ def render_related_block(neighbors: list[dict]) -> str:
 def upsert_related_block(text: str, block: str) -> str:
     """Replace the managed Related block, or append it at the end of the note."""
     pattern = re.compile(re.escape(RELATED_BEGIN) + r".*?" + re.escape(RELATED_END), flags=re.S)
+    if len(pattern.findall(text)) > 1:
+        # Multiple related pairs (LiveSync conflict merge or a note quoting the
+        # markers): refuse rather than replace-all and destroy content (low-7).
+        print("[moc_linker] multiple related blocks found; skipping to avoid data loss",
+              file=sys.stderr)
+        return text
     if pattern.search(text):
         # Function replacement: model-generated block inserted verbatim, never
-        # interpreted as a re.sub replacement template (audit finding H-A).
-        return pattern.sub(lambda _m: block, text).rstrip() + "\n"
+        # interpreted as a re.sub replacement template (audit finding H-A). count=1
+        # touches only the single managed pair.
+        return pattern.sub(lambda _m: block, text, count=1).rstrip() + "\n"
     return text.rstrip() + "\n\n" + block + "\n"
 
 

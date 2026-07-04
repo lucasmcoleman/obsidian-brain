@@ -194,3 +194,21 @@ def test_write_mocs_prunes_note_moved_out_of_a_moc(vault):
                   apply=True, all_mocs=all_mocs)
     assert "[[Alpha]]" not in (moc_dir / "Work MOC.md").read_text(encoding="utf-8")
     assert "[[Alpha]]" in (moc_dir / "Health MOC.md").read_text(encoding="utf-8")
+
+
+# ── low-7: upsert must not destroy content when multiple marker pairs exist ──────
+def test_upsert_related_refuses_when_multiple_pairs():
+    text = (f"{ml.RELATED_BEGIN}\nOLD1\n{ml.RELATED_END}\n\nmiddle\n\n"
+            f"{ml.RELATED_BEGIN}\nUSER CONTENT\n{ml.RELATED_END}\n")
+    block = ml.render_related_block([{"title": "N", "desc": ""}])
+    out = ml.upsert_related_block(text, block)
+    assert out == text            # refuses rather than replace-all and destroy content
+    assert "USER CONTENT" in out and "OLD1" in out
+
+
+def test_upsert_managed_refuses_when_multiple_pairs():
+    text = (f"{ml.MANAGED_BEGIN}\nOLD1\n{ml.MANAGED_END}\n\nmiddle\n\n"
+            f"{ml.MANAGED_BEGIN}\nUSER CONTENT\n{ml.MANAGED_END}\n")
+    out = ml.upsert_managed_block(text, ml.render_managed_block([{"title": "N", "desc": ""}]), "Work")
+    assert out == text
+    assert "USER CONTENT" in out and "OLD1" in out
