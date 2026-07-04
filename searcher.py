@@ -17,6 +17,19 @@ from config import (
 from embedder import embed_query
 from indexer import INDEX_LOCK
 
+# In-process cache of the loaded FAISS index + parsed metadata, keyed by both
+# files' stat signature. Every query previously re-read index.faiss and re-parsed
+# the FULL metadata.json (which stores every chunk's text) from disk — a per-query
+# cost that grows linearly with the vault and is re-paid on every stateless-HTTP
+# request. A rebuild swaps the files via os.replace (new inode/mtime), so the key
+# changes and the next query reloads (scalability gap, AUDIT 2026-07-03).
+_INDEX_CACHE: dict = {}
+
+
+def _stat_key(path: str) -> tuple:
+    st = os.stat(path)
+    return (st.st_ino, st.st_mtime_ns, st.st_size)
+
 
 def search(query: str, top_k: int = TOP_K) -> list[dict]:
     """
@@ -41,11 +54,19 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
     # new index against stale metadata (or a half-written file) mid-rebuild.
     with INDEX_LOCK:
         if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
+            _INDEX_CACHE.clear()
             return []
         try:
-            index = faiss.read_index(INDEX_PATH)
-            metadata = json.loads(Path(METADATA_PATH).read_text())
+            key = (_stat_key(INDEX_PATH), _stat_key(METADATA_PATH))
+            cached = _INDEX_CACHE.get("entry")
+            if cached and cached[0] == key:
+                index, metadata = cached[1], cached[2]
+            else:
+                index = faiss.read_index(INDEX_PATH)
+                metadata = json.loads(Path(METADATA_PATH).read_text())
+                _INDEX_CACHE["entry"] = (key, index, metadata)
         except (json.JSONDecodeError, OSError, RuntimeError) as e:
+            _INDEX_CACHE.clear()
             print(f"[searcher] index/metadata unreadable, returning no results: {e}",
                   file=sys.stderr)
             return []

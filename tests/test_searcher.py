@@ -41,6 +41,33 @@ def test_search_fills_top_k_across_distinct_notes(brain_paths, make_note, fake_e
     assert len({r["note_path"] for r in res}) == 5  # distinct notes
 
 
+def test_search_caches_index_between_queries(brain_paths, make_note, fake_embed, monkeypatch):
+    # Per-query faiss.read_index + full-metadata json.loads grows linearly with the
+    # vault; unchanged files must be served from the in-process cache (scalability).
+    make_note("a.md", "alpha content here.")
+    indexer.build_index(force=True)
+
+    reads = {"n": 0}
+    real_read = searcher.faiss.read_index
+
+    def counting_read(path):
+        reads["n"] += 1
+        return real_read(path)
+
+    monkeypatch.setattr(searcher.faiss, "read_index", counting_read)
+    searcher._INDEX_CACHE.clear()
+
+    assert searcher.search("alpha")          # cold: reads from disk
+    assert searcher.search("alpha")          # warm: served from cache
+    assert reads["n"] == 1
+
+    make_note("b.md", "beta content here.")  # rebuild swaps new files in
+    indexer.build_index(force=False)
+    res = searcher.search("beta")            # cache must notice and reload
+    assert reads["n"] == 2
+    assert any(r["note_path"] == "b.md" for r in res)
+
+
 def test_search_results_are_json_serializable(brain_paths, make_note, fake_embed):
     import json
     make_note("a.md", "alpha content here about a topic.")
