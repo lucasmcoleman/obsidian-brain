@@ -38,6 +38,13 @@ deployment is reproducible from the repo (the compose file itself lives outside 
       # auto-selects the right instruction format per model family; changing the
       # model triggers a full reindex automatically (index_params).
       - EMBEDDING_MODEL=text-embedding-qwen3-embedding-8b
+      # The 8B is idle-fast (~5 chunks/s, ~0.3s query) but CRASHES LM Studio under
+      # CONCURRENT load. Small batches keep a single build safe; the operational
+      # rule is one build at a time — never manual POST /refresh while a build (or
+      # the ~30s-after-boot on_start refresh) is running. First reindex ~10-20 min;
+      # nightly is incremental (content-hash cache) so it stays fast.
+      - EMBED_BATCH_SIZE=8
+      - EMBED_TIMEOUT=120
       # Require a bearer token on every HTTP request except /health (audit H-1).
       # Generate once: `openssl rand -hex 32`. Without it the tools are open.
       - BRAIN_AUTH_TOKEN=CHANGE_ME_openssl_rand_hex_32
