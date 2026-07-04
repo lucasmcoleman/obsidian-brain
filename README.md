@@ -150,7 +150,7 @@ The implicit contract: **FAISS row `i` corresponds positionally to `metadata["ch
 |------|----------------|
 | `brain.py` | Facade behind the MCP tools: `query_brain` (→ `brain_query`), `write_entity_note` (→ `brain_write_entity`), `append_insight` (→ `brain_append_insight`), `consolidate`/`get_or_build_index` (→ `brain_build_index`). Entity slug collapses every non-alphanumeric run to a single `-`. **Existing entity files are never overwritten** (`write_entity_note` returns `status:"exists"`). `append_insight`/`write_entity_note` return structured dicts (`status` `ok`/`error`/`created`/`exists`), confine writes to the vault via `safe_paths.resolve_in_vault`, preserve line endings, and write atomically. |
 | `tasks.py` | Index-free, deterministic checkbox layer. Walks every `*.md` except those under `_brain/`, matches `- [ ]` / `- [x]` (also `*`/`+` bullets, `x`/`X`). `scan_tasks(status)`, `count_tasks()`, `complete_task(note_path, match, …)`, `format_tasks()`. `complete_task` requires the `match` substring to identify **exactly one** open task (else `error`/`ambiguous`, writing nothing) and stamps completion with Obsidian Tasks' `✅ YYYY-MM-DD`. |
-| `consolidate.py` | Nightly cron entrypoint (`python consolidate.py [--force]`). **Hard-requires `OBSIDIAN_VAULT_PATH` in the environment** (exits 1 otherwise). Note: it calls `brain.consolidate()`, which always force-rebuilds — so the `--force` flag is cosmetic and the `already_current` branch is effectively unreachable from this path. |
+| `consolidate.py` | Nightly cron entrypoint (`python consolidate.py [--force]`). **Hard-requires `OBSIDIAN_VAULT_PATH` in the environment** (exits 1 otherwise). Calls `brain.consolidate(force=…)`: plain `consolidate.py` takes the incremental path (rebuilds only if the vault or index params changed); `--force` re-embeds everything. |
 
 ### MCP server
 
@@ -252,6 +252,8 @@ There is one environment variable that governs the **core** pipeline (`OBSIDIAN_
 | `MCP_PATH` | `/mcp` | URL path for the streamable-HTTP endpoint. |
 | `BRAIN_STATELESS_HTTP` | `1` | Truthy → `FastMCP(stateless_http=True)`: every request is self-contained, avoiding server-side session IDs that expire under long-lived clients. Set `0` only if sticky sessions are ever needed. |
 | `BRAIN_AUTH_TOKEN` | _(unset)_ | If set, the HTTP transport requires `Authorization: Bearer <token>` on every request except `GET /health`; mismatches get `401`. **If unset, the HTTP tools are unauthenticated** (a loud warning is logged) — restrict the port to a trusted network. No effect in stdio mode. |
+| `BRAIN_ALLOWED_HOSTS` | _(unset)_ | Comma-separated `host[:port]` allowlist. When set, enables the MCP SDK's DNS-rebinding/`Host`+`Origin` validation even though the container binds `0.0.0.0` (the SDK only auto-enables it for a loopback bind). Unset → protection off, and a loud `[security]` warning is logged. |
+| `BRAIN_ALLOWED_ORIGINS` | `http://<each allowed host>` | Comma-separated browser `Origin` allowlist used with `BRAIN_ALLOWED_HOSTS`. |
 
 ### Nightly scheduler (`mcp_server.py`, HTTP mode only)
 
@@ -271,6 +273,8 @@ There is one environment variable that governs the **core** pipeline (`OBSIDIAN_
 | `BRAIN_LEDGER_ENABLED` | `1` | If truthy, run `ledger_update.py --apply` after each refresh. |
 | `LINKER_CHAT_URL` | value of `LM_BASE_URL` env (fallback `http://localhost:1234/v1`) | OpenAI-compatible **chat** endpoint for MOC classification + ledger reasoning. Deployment sets `http://192.168.0.29:4004/v1` (llama-swap). |
 | `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | Chat model id passed as `--model`. Deployment overrides to `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`. |
+| `LEDGER_CHAT_URL` | value of `LINKER_CHAT_URL` | Chat endpoint for the **ledger** update, split from the linker (commit `466d3b1`) so the harder ledger task can use a different/stronger endpoint. Falls back to the linker's. |
+| `LEDGER_CHAT_MODEL` | value of `LINKER_CHAT_MODEL` | Chat model for the ledger update. Deployment sets the 35B here while the linker runs on the NPU 9B. |
 | `LM_BASE_URL` | `http://localhost:1234/v1` *(in this function)* | **Re-read from env here** (different default than `config.py`!) to pass `--embed-endpoint`. |
 | `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v2-moe` *(in this function)* | Re-read from env to pass `--embed-model`. |
 | `OBSIDIAN_VAULT_PATH` | `/vault` *(in this function)* | Re-read from env (different default than `config.py`) to pass `--vault`. |

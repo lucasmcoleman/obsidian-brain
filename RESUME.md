@@ -1,7 +1,14 @@
 # Obsidian Brain — Project Resume
 
-**Last updated:** 2026-06-16
-**Status:** Operational. Index built, cron job active, write-back tested.
+**Last updated:** 2026-06-16 (architecture partially stale — see note)
+**Status:** Operational. Index built, nightly refresh active, write-back tested.
+
+> **Stale-architecture note (2026-07-03):** this file predates the containerized
+> deployment. Corrections: retrieval is FAISS **L2** order with note-level dedup
+> (no cosine re-ranking); the nightly refresh is a **daemon thread baked into the
+> HTTP MCP server** (`BRAIN_REFRESH_AT_HOUR`), **not** an external host cron; and
+> the container runs **streamable-HTTP**, not stdio. See `README.md` /
+> `deploy/README.md` for the current design.
 
 ## What This Is
 
@@ -19,7 +26,7 @@ A "gbrain alternative" — a persistent knowledge layer that:
   config.py          — vault path, embedding model, chunk settings
   embedder.py        — LM Studio OpenAI-compatible API client
   indexer.py         — vault scanner, chunker, FAISS index builder
-  searcher.py        — semantic search with cosine re-ranking
+  searcher.py        — semantic search (FAISS L2 order, note-level dedup)
   brain.py           — orchestration: retrieval + write-back to vault
   consolidate.py     — standalone nightly consolidation script
   mcp_server.py      — stdio MCP server for external agents (Copilot Coworker, etc.)
