@@ -67,7 +67,14 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
 
     # Query gets the nomic "search_query: " prefix to match the "search_document: "
     # prefix on indexed passages; both must be applied together (M-A).
-    query_embedding = embed_query(EMBED_QUERY_PREFIX + query)
+    try:
+        query_embedding = embed_query(EMBED_QUERY_PREFIX + query)
+    except Exception as e:  # embedding endpoint down/misconfigured
+        # Degrade to [] (as documented) instead of propagating, but log loudly so
+        # an outage is visible in the container logs rather than silent.
+        print(f"[searcher] query embedding failed, returning no results: {e}",
+              file=sys.stderr)
+        return []
     query_vec = np.array([query_embedding]).astype("float32")
 
     # Retrieve a generous candidate pool so dedup-to-one-chunk-per-note can still
