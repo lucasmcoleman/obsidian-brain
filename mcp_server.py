@@ -583,6 +583,18 @@ def _post_refresh_tasks() -> None:
     ledger_url = os.environ.get("LEDGER_CHAT_URL", chat_url)
     ledger_model = os.environ.get("LEDGER_CHAT_MODEL", chat_model)
 
+    # Truth maintenance (contradiction triage) runs FIRST — before the linker's
+    # note rewrites — so its recency window sees genuine human edits. Off by
+    # default: run `truth_maintenance.py --dry-run` by hand to gauge precision,
+    # then set BRAIN_TRUTH_ENABLED=1 once trusted (observe-only rollout).
+    if _truthy("BRAIN_TRUTH_ENABLED", "0"):
+        truth_url = os.environ.get("TRUTH_CHAT_URL", ledger_url)
+        truth_model = os.environ.get("TRUTH_CHAT_MODEL", ledger_model)
+        _run_script("truth_maintenance.py", [
+            "--apply", "--backfill", "--vault", vault,
+            "--endpoint", truth_url, "--model", truth_model,
+            "--embed-endpoint", lm, "--embed-model", embed_model,
+        ], "truth")
     if _truthy("BRAIN_LINKER_ENABLED", "1"):
         _run_script("moc_linker.py", [
             "--apply", "--tag-notes", "--related", "--vault", vault,
