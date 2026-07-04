@@ -30,6 +30,71 @@ def ensure_dirs():
     os.makedirs(ENTITIES_DIR, exist_ok=True)
 
 
+def _emb_cache_path() -> str:
+    return os.path.join(BRAIN_DIR, "embcache.npz")
+
+
+def _emb_key(text: str) -> str:
+    """Cache key for a chunk's embedding. Includes the model and doc prefix, so a
+    model/prefix change naturally invalidates every entry (the whole index rebuilds
+    on such a change anyway — M-L)."""
+    h = hashlib.sha256()
+    h.update(EMBEDDING_MODEL.encode("utf-8"))
+    h.update(b"\0")
+    h.update(EMBED_DOC_PREFIX.encode("utf-8"))
+    h.update(b"\0")
+    h.update(text.encode("utf-8"))
+    return h.hexdigest()
+
+
+def _load_emb_cache() -> dict:
+    """Load the content-hash → vector cache (best-effort; a missing/corrupt cache
+    just means a full re-embed)."""
+    path = _emb_cache_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        data = np.load(path, allow_pickle=False)
+        keys, vectors = data["keys"], data["vectors"]
+        return {str(k): vectors[i] for i, k in enumerate(keys)}
+    except Exception as e:  # noqa: BLE001 — any read failure → rebuild from scratch
+        print(f"[indexer] embedding cache unreadable ({e}); re-embedding all", file=sys.stderr)
+        return {}
+
+
+def _save_emb_cache(cache: dict) -> None:
+    if not cache:
+        return
+    path = _emb_cache_path()
+    # np.savez appends '.npz' unless the name already ends in it, so the tmp name
+    # must end in '.npz' or the os.replace source won't exist.
+    tmp = path + ".building.npz"
+    try:
+        keys = np.array(list(cache.keys()))
+        vectors = np.array(list(cache.values()), dtype="float32")
+        np.savez(tmp, keys=keys, vectors=vectors)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"[indexer] could not write embedding cache: {e}", file=sys.stderr)
+
+
+def _embed_chunks_cached(chunk_texts: list[str]) -> list:
+    """Return an embedding per chunk, embedding ONLY texts not already in the cache
+    (keyed by content hash), so a rebuild after a small edit re-embeds just the
+    changed chunks instead of the whole vault (capability #2). The cache is pruned
+    to the current chunk set each build so it can't grow unbounded."""
+    cache = _load_emb_cache()
+    keys = [_emb_key(t) for t in chunk_texts]
+    missing_idx = [i for i, k in enumerate(keys) if k not in cache]
+    if missing_idx:
+        fresh = embed_texts([EMBED_DOC_PREFIX + chunk_texts[i] for i in missing_idx])
+        for i, vec in zip(missing_idx, fresh):
+            cache[keys[i]] = np.array(vec, dtype="float32")
+    embeddings = [cache[k] for k in keys]
+    _save_emb_cache({k: cache[k] for k in keys})  # prune to current keys
+    return embeddings
+
+
 def _fsync_path(path: str) -> None:
     """Best-effort fsync of a file or directory, so an os.replace'd index/metadata
     actually reaches disk before we trust it — a power loss between write and
@@ -281,10 +346,10 @@ def build_index(force: bool = False) -> dict[str, Any]:
         return {"status": "no_content", "notes": 0}
 
     print("Generating embeddings...")
-    # Prefix the embedding INPUT only (nomic task instruction); the stored chunk
-    # text stays clean so retrieval returns the original passage (M-A).
-    texts = [EMBED_DOC_PREFIX + c["text"] for c in all_chunks]
-    embeddings = embed_texts(texts)
+    # Embed via the content-hash cache so only new/changed chunks hit the endpoint;
+    # the EMBED_DOC_PREFIX (nomic task instruction) is applied to the embed INPUT
+    # only, so the stored chunk text stays clean for retrieval (M-A / capability #2).
+    embeddings = _embed_chunks_cached([c["text"] for c in all_chunks])
 
     # Build FAISS index
     dim = len(embeddings[0])

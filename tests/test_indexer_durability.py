@@ -204,6 +204,29 @@ def test_incremental_build_stays_current_when_params_unchanged(brain_paths, make
     assert result["status"] == "already_current"  # params match → no needless re-embed
 
 
+def test_incremental_build_reuses_cached_embeddings(brain_paths, make_note, monkeypatch):
+    # A content-hash embedding cache means only new/changed chunks hit the endpoint
+    # on a rebuild, instead of re-embedding the whole vault (capability #2).
+    counted = {"texts": 0}
+
+    def counting_embed(texts):
+        counted["texts"] += len(texts)
+        return [[float(len(t))] * 8 for t in texts]
+
+    monkeypatch.setattr(indexer, "embed_texts", counting_embed)
+    make_note("a.md", "alpha content here.")
+    make_note("b.md", "beta content here.")
+    indexer.build_index(force=True)
+    first = counted["texts"]
+    assert first >= 2  # embedded both notes
+
+    make_note("c.md", "gamma content here.")  # one new note
+    counted["texts"] = 0
+    indexer.build_index(force=False)          # vault changed → rebuild, but cache hits a & b
+    assert counted["texts"] >= 1              # embedded the new note
+    assert counted["texts"] < first           # did NOT re-embed the unchanged notes
+
+
 def test_cleanup_removes_leftover_tmp_files(brain_paths):
     brain_dir = brain_paths["brain_dir"]
     brain_dir.mkdir(parents=True, exist_ok=True)
