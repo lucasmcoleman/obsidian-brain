@@ -21,6 +21,19 @@ def test_cosine_sim_dead_code_removed():
     assert not hasattr(searcher, "cosine_sim")  # L1
 
 
+def test_chunk_text_hard_caps_oversized_sentence():
+    # A long run with no .!? is one "sentence"; it must be sub-split so no single
+    # chunk blows past the model's context window and gets silently truncated (M-B).
+    text = " ".join(f"word{i}" for i in range(4000))
+    chunks = indexer.chunk_text(text, max_tokens=500, overlap=50)
+    assert len(chunks) > 1
+    for c in chunks:
+        assert indexer.count_tokens(c["text"]) <= 500
+    joined = " ".join(c["text"] for c in chunks)
+    for i in (0, 1999, 3999):
+        assert f"word{i}" in joined  # no content silently dropped
+
+
 def test_rebuild_after_note_deletion_drops_stale_chunks(brain_paths, make_note, fake_embed):
     make_note("a.md", "Alpha content about apples.")
     make_note("b.md", "Beta content about bananas.")

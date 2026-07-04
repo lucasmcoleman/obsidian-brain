@@ -129,6 +129,21 @@ def chunk_text(text: str, max_tokens: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     """
     # Split by sentence boundaries for cleaner chunks
     sentences = re.split(r'(?<=[.!?])\s+', text)
+    # Hard-split any single "sentence" that already exceeds the budget (a table,
+    # code block, link/bullet list, or OCR run with no .!? terminator) so no chunk
+    # can blow past the model's context window and get silently truncated (M-B).
+    # Split target is max_tokens-overlap so the overlap prepend can't push a chunk
+    # back over max_tokens.
+    max_words = max(1, int(max(max_tokens - overlap, max_tokens // 2) / 1.3))
+    bounded = []
+    for s in sentences:
+        if count_tokens(s) <= max_tokens:
+            bounded.append(s)
+            continue
+        words = s.split()
+        for i in range(0, len(words), max_words):
+            bounded.append(" ".join(words[i:i + max_words]))
+    sentences = bounded
     chunks = []
     current_chunk_words = []
     current_tokens = 0
