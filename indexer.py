@@ -30,6 +30,20 @@ def ensure_dirs():
     os.makedirs(ENTITIES_DIR, exist_ok=True)
 
 
+def _fsync_path(path: str) -> None:
+    """Best-effort fsync of a file or directory, so an os.replace'd index/metadata
+    actually reaches disk before we trust it — a power loss between write and
+    flush could otherwise leave a torn file on this power-cycled host (low-1)."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 def cleanup_tmp_files() -> None:
     """Remove leftover *.tmp files from a crashed/interrupted build so they can
     never be mistaken for a real index (audit finding M1)."""
@@ -224,7 +238,6 @@ def build_index(force: bool = False) -> dict[str, Any]:
     Returns a summary dict.
     """
     ensure_dirs()
-    cleanup_tmp_files()  # clear any leftover *.tmp from a crashed prior build (M1)
 
     notes = scan_vault(VAULT_PATH)
 
@@ -295,12 +308,20 @@ def build_index(force: bool = False) -> dict[str, Any]:
     # guards same-process readers. Writes go to *.tmp then os.replace so a
     # concurrent search sees either the complete old or complete new index.
     with _build_lock(), INDEX_LOCK:
+        # Clear leftover *.tmp from a crashed prior build INSIDE the lock, so a
+        # concurrent build can't delete this build's in-flight tmp mid-swap (low-2).
+        cleanup_tmp_files()
         tmp_index = INDEX_PATH + ".tmp"
         tmp_meta = METADATA_PATH + ".tmp"
         faiss.write_index(index, tmp_index)
         Path(tmp_meta).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        # fsync the tmp files before the replaces, and the directory after, so a
+        # crash can't leave a torn index/metadata pair on disk (low-1).
+        _fsync_path(tmp_index)
+        _fsync_path(tmp_meta)
         os.replace(tmp_index, INDEX_PATH)
         os.replace(tmp_meta, METADATA_PATH)
+        _fsync_path(BRAIN_DIR)
 
     print(f"Index saved: {INDEX_PATH}")
     return {"status": "built", "notes": len(notes), "chunks": len(all_chunks), "path": INDEX_PATH}
