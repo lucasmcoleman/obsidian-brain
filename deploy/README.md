@@ -145,6 +145,34 @@ The tools read **and write** the vault, so treat the endpoint as privileged:
 | `BRAIN_ALLOWED_HOSTS` | *(unset = off)* | comma-separated host[:port] allowlist; enables DNS-rebinding protection |
 | `BRAIN_ALLOWED_ORIGINS` | `http://<each host>` | comma-separated browser `Origin` allowlist |
 
+## Reverse proxy (SWAG)
+
+The live deployment fronts the brain with SWAG at **`https://brain.lucascoleman.me`**
+so the web UI and MCP endpoint are reachable from any device without an SSH tunnel.
+SWAG reaches the container over the `backend` docker network (`obsidian-brain-mcp:8000`),
+so this works regardless of the loopback host-port bind. The proxy conf lives at
+[`deploy/swag/brain.subdomain.conf`](swag/brain.subdomain.conf) (mirror of the file
+in the SWAG volume at `/config/nginx/proxy-confs/`, kept here so the setup is
+reproducible from the repo).
+
+- **Auth model: bearer token, uniform.** The brain's `BRAIN_AUTH_TOKEN` gates every
+  route except `GET /health` and the `GET /ui` HTML shell — for the browser UI, the
+  Obsidian plugin, and MCP agents alike. This is why the conf does **not** enable
+  Authelia: an interactive login would break the plugin/agents (they present a
+  bearer, not a session cookie). To add an Authelia login in front of the *browser
+  shell only*, uncomment the `authelia-*` includes in `location /` (leave `/ui/api`,
+  `/mcp`, `/refresh` bearer-only).
+- **Allowlist.** `brain.lucascoleman.me` is added to `BRAIN_ALLOWED_HOSTS` and
+  `https://brain.lucascoleman.me` to `BRAIN_ALLOWED_ORIGINS` (above) so the proxied
+  Host/Origin pass DNS-rebinding validation.
+- **Install:** `docker cp deploy/swag/brain.subdomain.conf swag:/config/nginx/proxy-confs/`
+  then `docker exec swag nginx -s reload`. Requires the `brain.*` name to resolve
+  (covered by the existing `*.lucascoleman.me` wildcard DNS + cert).
+
+Accessing the UI: open `https://brain.lucascoleman.me/ui`, click **Token**, paste
+the value of `BRAIN_AUTH_TOKEN` (kept in the browser's `sessionStorage`). Point the
+Obsidian plugin's base URL at the same host with the same token.
+
 ## Transports
 
 `mcp_server.py` supports both:
