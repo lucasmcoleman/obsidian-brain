@@ -183,9 +183,13 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
     notes = []
     vault = Path(vault_path)
     for md_file in vault.rglob("*.md"):
-        if "_brain" in md_file.parts:
-            continue
         rel_path = md_file.relative_to(vault)
+        # Skip everything under _brain/ EXCEPT _brain/entities/, so the derivative
+        # index files stay out but curated entity notes (brain_write_entity) are
+        # indexed and retrievable rather than write-only (audit finding M-D).
+        if rel_path.parts and rel_path.parts[0] == "_brain" and not (
+                len(rel_path.parts) >= 2 and rel_path.parts[1] == "entities"):
+            continue
         try:
             content = md_file.read_text(encoding="utf-8")
             # Strip Obsidian metadata frontmatter
