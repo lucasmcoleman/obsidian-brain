@@ -48,8 +48,9 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse
 
 from brain import (
     query_brain,
@@ -57,6 +58,7 @@ from brain import (
     append_insight,
     build_index,
 )
+from searcher import search as _search_notes
 from tasks import scan_tasks, complete_task, count_tasks, format_tasks
 from config import (
     VAULT_PATH,
@@ -186,9 +188,9 @@ def brain_build_index(force: bool = False) -> str:
     return json.dumps(build_index(force=force), indent=2)
 
 
-@mcp.tool()
-def brain_status() -> str:
-    """Report brain state: vault path, embedding model, index stats, entity count."""
+def _collect_status() -> dict:
+    """Assemble the brain's state dict. Shared by the brain_status tool and the web
+    UI's /ui/api/status route."""
     status: dict = {
         "vault_path": VAULT_PATH,
         "embedding_model": EMBEDDING_MODEL,
@@ -211,7 +213,12 @@ def brain_status() -> str:
 
     if os.path.exists(INDEX_PATH):
         import faiss
-        status["index_vector_count"] = faiss.read_index(INDEX_PATH).ntotal
+        # Guard the read: a corrupt/truncated index must not crash the one surface
+        # meant to diagnose exactly that (July-1 finding M-1).
+        try:
+            status["index_vector_count"] = faiss.read_index(INDEX_PATH).ntotal
+        except (RuntimeError, OSError) as e:
+            status["index_vector_count"] = f"index unreadable ({e})"
     else:
         status["index_vector_count"] = "no index"
 
@@ -224,13 +231,230 @@ def brain_status() -> str:
 
     status["tasks"] = count_tasks()
 
-    return json.dumps(status, indent=2)
+    return status
+
+
+@mcp.tool()
+def brain_status() -> str:
+    """Report brain state: vault path, embedding model, index stats, entity count."""
+    return json.dumps(_collect_status(), indent=2)
 
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health(_request: Request) -> JSONResponse:
     """Lightweight liveness probe for container healthchecks / load balancers."""
     return JSONResponse({"status": "ok", "service": "obsidian-brain"})
+
+
+# Self-contained page: inline CSS/JS, no external assets (matches the image ethos).
+# Vault text is rendered via textContent only, so an injected note body can't run
+# script and steal the sessionStorage token.
+_UI_HTML = r"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Obsidian Brain</title>
+<style>
+  :root{--bg:#fbfbfa;--fg:#1c1b19;--muted:#6b6a66;--card:#fff;--line:#e6e4df;--accent:#6a5acd;--accent-fg:#fff}
+  @media(prefers-color-scheme:dark){:root{--bg:#1a1a19;--fg:#e9e7e2;--muted:#9a988f;--card:#242422;--line:#34332f;--accent:#8f82e0;--accent-fg:#15140f}}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--fg)}
+  header{display:flex;align-items:center;gap:.75rem;flex-wrap:wrap;padding:1rem 1.25rem;border-bottom:1px solid var(--line)}
+  h1{font-size:1.05rem;margin:0;font-weight:650;letter-spacing:.01em}
+  .pill{font-size:.72rem;padding:.2rem .55rem;border-radius:99px;border:1px solid var(--line);color:var(--muted)}
+  .pill.ok{color:#12805c;border-color:#12805c55}.pill.bad{color:#c0392b;border-color:#c0392b55}
+  .spacer{flex:1}
+  main{max-width:820px;margin:0 auto;padding:1.25rem}
+  nav{display:flex;gap:.25rem;margin-bottom:1rem}
+  nav button{background:none;border:none;color:var(--muted);padding:.5rem .8rem;border-radius:8px;cursor:pointer;font:inherit}
+  nav button.active{background:var(--card);color:var(--fg);box-shadow:0 0 0 1px var(--line)}
+  input,button.go{font:inherit}
+  .row{display:flex;gap:.5rem;flex-wrap:wrap}
+  input[type=text],input[type=password],select{flex:1;min-width:8rem;padding:.55rem .7rem;border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--fg)}
+  button.go{padding:.55rem 1rem;border:none;border-radius:9px;background:var(--accent);color:var(--accent-fg);cursor:pointer;font-weight:600}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:.85rem 1rem;margin:.6rem 0}
+  .card .path{font-weight:600;font-size:.9rem;word-break:break-word}
+  .card .score{float:right;font-size:.72rem;color:var(--muted)}
+  .card .snip{color:var(--muted);font-size:.88rem;margin-top:.35rem;white-space:pre-wrap}
+  .note-group{margin:.75rem 0}.note-group h3{font-size:.85rem;margin:.2rem 0;color:var(--muted);font-weight:600}
+  .task{padding:.15rem 0}.task .box{color:var(--accent);margin-right:.4rem}
+  .muted{color:var(--muted)}.hidden{display:none}
+  dl{display:grid;grid-template-columns:auto 1fr;gap:.3rem .9rem;margin:0}
+  dt{color:var(--muted)}dd{margin:0;word-break:break-word}
+  .err{color:#c0392b;font-size:.85rem}
+</style></head>
+<body>
+<header>
+  <h1>🧠 Obsidian Brain</h1>
+  <span id="conn" class="pill">…</span>
+  <div class="spacer"></div>
+  <button class="go" id="tokbtn" style="background:none;color:var(--muted);border:1px solid var(--line);font-weight:500">Token</button>
+</header>
+<main>
+  <nav>
+    <button data-tab="search" class="active">Search</button>
+    <button data-tab="tasks">Tasks</button>
+    <button data-tab="status">Status</button>
+  </nav>
+
+  <section id="tab-search">
+    <div class="row">
+      <input type="text" id="q" placeholder="Ask the vault… (people, projects, decisions)" autofocus>
+      <button class="go" id="searchgo">Search</button>
+    </div>
+    <div id="results"></div>
+  </section>
+
+  <section id="tab-tasks" class="hidden">
+    <div class="row">
+      <select id="tstatus"><option value="open">Open</option><option value="done">Done</option><option value="all">All</option></select>
+      <input type="text" id="tq" placeholder="filter by text or note…">
+      <button class="go" id="tasksgo">List</button>
+    </div>
+    <div id="taskcounts" class="muted" style="margin:.5rem 0"></div>
+    <div id="tasks"></div>
+  </section>
+
+  <section id="tab-status" class="hidden">
+    <div class="card"><dl id="status"></dl></div>
+  </section>
+</main>
+
+<script>
+const $=s=>document.querySelector(s), el=(t,c)=>{const e=document.createElement(t);if(c)e.className=c;return e};
+const TK='brain_token';
+function token(){return sessionStorage.getItem(TK)||''}
+function setToken(){const t=prompt('Bearer token (leave blank if the server has no BRAIN_AUTH_TOKEN):',token());if(t!==null)sessionStorage.setItem(TK,t.trim());}
+async function api(path){
+  const h={};const t=token();if(t)h['Authorization']='Bearer '+t;
+  const r=await fetch(path,{headers:h});
+  if(r.status===401){setToken();throw new Error('unauthorized — token required');}
+  if(!r.ok)throw new Error('HTTP '+r.status);
+  return r.json();
+}
+function conn(ok,txt){const c=$('#conn');c.className='pill '+(ok?'ok':'bad');c.textContent=txt;}
+
+async function doSearch(){
+  const q=$('#q').value.trim();const box=$('#results');box.textContent='';
+  if(!q)return;
+  box.innerHTML='<p class="muted">searching…</p>';
+  try{
+    const d=await api('/ui/api/search?q='+encodeURIComponent(q)+'&k=8');box.textContent='';
+    if(!d.results.length){box.innerHTML='<p class="muted">No relevant notes found.</p>';return;}
+    for(const r of d.results){
+      const c=el('div','card');
+      const s=el('span','score');s.textContent='score '+r.score;
+      const p=el('div','path');p.appendChild(s);
+      const a=el('a');a.textContent=r.note_path;a.href='obsidian://open?path='+encodeURIComponent(r.abs_path||r.note_path);a.style.color='inherit';
+      p.appendChild(a);
+      const sn=el('div','snip');sn.textContent=(r.text||'').slice(0,500);
+      c.appendChild(p);c.appendChild(sn);box.appendChild(c);
+    }
+  }catch(e){box.innerHTML='';const p=el('p','err');p.textContent=e.message;box.appendChild(p);}
+}
+async function doTasks(){
+  const box=$('#tasks');box.innerHTML='<p class="muted">loading…</p>';
+  try{
+    const st=$('#tstatus').value,q=$('#tq').value.trim();
+    const d=await api('/ui/api/tasks?status='+st+'&q='+encodeURIComponent(q));
+    $('#taskcounts').textContent=`open ${d.counts.open} · done ${d.counts.done} · total ${d.counts.total}`;
+    box.textContent='';
+    const byNote={};for(const t of d.tasks)(byNote[t.note_path]=byNote[t.note_path]||[]).push(t);
+    const keys=Object.keys(byNote).sort();
+    if(!keys.length){box.innerHTML='<p class="muted">No matching tasks.</p>';return;}
+    for(const n of keys){
+      const g=el('div','note-group');const h=el('h3');h.textContent=n;g.appendChild(h);
+      for(const t of byNote[n]){const d2=el('div','task');const b=el('span','box');b.textContent=t.status==='done'?'☑':'☐';const s=el('span');s.textContent=t.text;d2.appendChild(b);d2.appendChild(s);g.appendChild(d2);}
+      box.appendChild(g);
+    }
+  }catch(e){box.innerHTML='';const p=el('p','err');p.textContent=e.message;box.appendChild(p);}
+}
+async function loadStatus(){
+  try{
+    const d=await api('/ui/api/status');const dl=$('#status');dl.textContent='';
+    const order=['vault_path','embedding_model','notes_indexed','chunks','index_vector_count','entity_count','index_mtime','lm_base_url'];
+    for(const k of order){if(d[k]===undefined)continue;const dt=el('dt');dt.textContent=k.replace(/_/g,' ');const dd=el('dd');dd.textContent=typeof d[k]==='object'?JSON.stringify(d[k]):String(d[k]);dl.appendChild(dt);dl.appendChild(dd);}
+    if(d.tasks){const dt=el('dt');dt.textContent='tasks';const dd=el('dd');dd.textContent=`open ${d.tasks.open} · done ${d.tasks.done}`;dl.appendChild(dt);dl.appendChild(dd);}
+    conn(true,'connected');
+  }catch(e){conn(false,'error');}
+}
+document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));b.classList.add('active');
+  for(const t of ['search','tasks','status'])$('#tab-'+t).classList.toggle('hidden',t!==b.dataset.tab);
+  if(b.dataset.tab==='tasks')doTasks();if(b.dataset.tab==='status')loadStatus();
+});
+$('#searchgo').onclick=doSearch;$('#q').addEventListener('keydown',e=>{if(e.key==='Enter')doSearch()});
+$('#tasksgo').onclick=doTasks;$('#tq').addEventListener('keydown',e=>{if(e.key==='Enter')doTasks()});
+$('#tokbtn').onclick=setToken;
+// Health check (no auth) then a status probe.
+fetch('/health').then(r=>conn(r.ok,r.ok?'online':'offline')).catch(()=>conn(false,'offline'));
+loadStatus();
+</script>
+</body></html>"""
+
+
+# ── Human-facing web UI (served on the same Starlette app) ───────────────────
+# GET /ui is a self-contained page (added to the auth public_paths; it contains
+# ZERO vault data). Every data call is a same-origin fetch to /ui/api/* carrying
+# the bearer token from sessionStorage, so it passes the SAME auth gate as /mcp —
+# no new auth code, and no unauthenticated write path. Blocking work (embed HTTP
+# call, FAISS read, file walks) runs in a threadpool so a request never stalls the
+# uvicorn event loop (and thus /mcp).
+
+@mcp.custom_route("/ui", methods=["GET"])
+async def ui_page(_request: Request) -> HTMLResponse:
+    return HTMLResponse(_UI_HTML)
+
+
+@mcp.custom_route("/ui/api/search", methods=["GET"])
+async def ui_search(request: Request) -> JSONResponse:
+    q = (request.query_params.get("q") or "").strip()
+    if not q:
+        return JSONResponse({"results": []})
+    try:
+        k = int(request.query_params.get("k", "5"))
+    except (TypeError, ValueError):
+        k = 5
+    results = await run_in_threadpool(_search_notes, q, k)
+    return JSONResponse({"results": results})
+
+
+@mcp.custom_route("/ui/api/tasks", methods=["GET"])
+async def ui_tasks(request: Request) -> JSONResponse:
+    status = (request.query_params.get("status") or "open").strip()
+    q = (request.query_params.get("q") or "").strip().lower()
+    tasks = await run_in_threadpool(scan_tasks, status)
+    if q:
+        tasks = [t for t in tasks if q in t["text"].lower() or q in t["note_path"].lower()]
+    counts = await run_in_threadpool(count_tasks)
+    return JSONResponse({"tasks": tasks, "counts": counts})
+
+
+@mcp.custom_route("/ui/api/status", methods=["GET"])
+async def ui_status(_request: Request) -> JSONResponse:
+    return JSONResponse(await run_in_threadpool(_collect_status))
+
+
+@mcp.custom_route("/ui/api/insight", methods=["POST"])
+async def ui_insight(request: Request) -> JSONResponse:
+    # Writes require auth to be configured: with no token the middleware is a no-op,
+    # so refuse rather than expose an anonymous write path (the lesson of H-1).
+    if not os.environ.get("BRAIN_AUTH_TOKEN", "").strip():
+        return JSONResponse(
+            {"status": "error", "detail": "writes disabled: BRAIN_AUTH_TOKEN is not set"},
+            status_code=503)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"status": "error", "detail": "invalid JSON"}, status_code=400)
+    note_path = (body.get("note_path") or "").strip()
+    insight = (body.get("insight") or "").strip()
+    context = (body.get("context") or "").strip()
+    if not note_path or not insight:
+        return JSONResponse(
+            {"status": "error", "detail": "note_path and insight are required"},
+            status_code=400)
+    result = await run_in_threadpool(append_insight, note_path, insight, context)
+    return JSONResponse(result)
 
 
 def _resolve_transport() -> str:
@@ -250,7 +474,8 @@ def _build_http_app():
     app = mcp.streamable_http_app()
     token = os.environ.get("BRAIN_AUTH_TOKEN", "").strip()
     if token:
-        app.add_middleware(BearerAuthMiddleware, token=token, public_paths={"/health"})
+        # /ui is the HTML shell only (no vault data); /ui/api/* stays gated.
+        app.add_middleware(BearerAuthMiddleware, token=token, public_paths={"/health", "/ui"})
         print("[auth] bearer-token auth enabled on HTTP transport", flush=True)
     else:
         print("[auth] WARNING: BRAIN_AUTH_TOKEN unset — HTTP tools are UNAUTHENTICATED; "
