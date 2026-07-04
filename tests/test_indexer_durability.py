@@ -34,6 +34,22 @@ def test_chunk_text_hard_caps_oversized_sentence():
         assert f"word{i}" in joined  # no content silently dropped
 
 
+def test_scan_vault_strips_moc_linker_managed_blocks(brain_paths, make_note):
+    # The linker writes '## Related Notes' wikilink blocks into note bodies; those
+    # must not be re-embedded, or a note becomes retrievable for topics it merely
+    # links to — a self-reinforcing precision drift (M-E).
+    body = ("Real content about apples.\n\n"
+            "<!-- moc-linker:related:begin (auto-generated; edit outside this block) -->\n"
+            "## Related Notes\n- [[Some Other Note]] — a description\n"
+            "<!-- moc-linker:related:end -->\n")
+    make_note("a.md", body)
+    notes = indexer.scan_vault(str(brain_paths["vault"]))
+    a = next(n for n in notes if n["path"] == "a.md")
+    assert "Real content about apples" in a["content"]
+    assert "Some Other Note" not in a["content"]
+    assert "moc-linker" not in a["content"]
+
+
 def test_rebuild_after_note_deletion_drops_stale_chunks(brain_paths, make_note, fake_embed):
     make_note("a.md", "Alpha content about apples.")
     make_note("b.md", "Beta content about bananas.")

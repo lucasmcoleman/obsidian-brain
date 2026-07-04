@@ -167,6 +167,14 @@ def chunk_text(text: str, max_tokens: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
     return chunks
 
 
+# The linker writes managed <!-- moc-linker:...:begin -->…<!-- ...:end --> blocks
+# (MOC links + "## Related Notes") into note bodies; strip them before embedding so
+# generated link boilerplate doesn't re-enter the index and make a note retrievable
+# for topics it merely links to (audit finding M-E). `:end` (not bare `end`) anchors
+# to the real close marker so stray "…end -->" text in prose can't truncate it.
+_MANAGED_BLOCK_RE = re.compile(r"<!--\s*moc-linker:.*?:end\s*-->", re.S)
+
+
 def scan_vault(vault_path: str) -> list[dict[str, Any]]:
     """
     Walk the vault and return all markdown notes with their content.
@@ -185,6 +193,9 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
                 parts = content.split("---", 2)
                 if len(parts) >= 3:
                     content = parts[2].strip()
+            # Strip the linker's managed blocks so generated link boilerplate is
+            # never re-embedded (M-E).
+            content = _MANAGED_BLOCK_RE.sub("", content).strip()
             notes.append({
                 "path": str(rel_path),
                 "abs_path": str(md_file),
