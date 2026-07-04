@@ -2,6 +2,8 @@
 
 A local, agent-native semantic memory layer over an [Obsidian](https://obsidian.md) markdown vault. Obsidian Brain turns a directory of `.md` notes into a queryable FAISS index, exposes it to AI agents as a set of [MCP](https://modelcontextprotocol.io) tools, and runs a baked-in nightly maintenance pipeline that rebuilds the index, organizes notes into Maps-of-Content (MOCs), cross-links related notes, and maintains an action-items ledger — all using **local** LLM endpoints, with no data leaving the LAN.
 
+> **Human-facing surfaces & truth maintenance (2026-07):** besides the MCP tools the brain now serves a **web UI** at `GET /ui` (search / open-tasks / status / append-insight, bearer-gated), a **`POST /refresh`** endpoint for on-demand incremental reindex, and ships an **Obsidian plugin** (`plugin/`, install via BRAT) with a live active-note related-notes panel and an "ask the brain" command. Retrieval is now **provenance-aware**: notes marked `review_status: superseded/contested` or `unreviewed` transcript/OCR are down-weighted and annotated (`⚠️ SUPERSEDED → …`) so an agent sees a claim is disputed instead of compounding it. `truth_maintenance.py` (nightly, off by default via `BRAIN_TRUTH_ENABLED`) backfills provenance and triages contradictions into a human `truth-review-queue.md`. See `AUDIT_2026-07-03.md` for the design and remediation log.
+
 ---
 
 ## Table of Contents
@@ -275,6 +277,9 @@ There is one environment variable that governs the **core** pipeline (`OBSIDIAN_
 | `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | Chat model id passed as `--model`. Deployment overrides to `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`. |
 | `LEDGER_CHAT_URL` | value of `LINKER_CHAT_URL` | Chat endpoint for the **ledger** update, split from the linker (commit `466d3b1`) so the harder ledger task can use a different/stronger endpoint. Falls back to the linker's. |
 | `LEDGER_CHAT_MODEL` | value of `LINKER_CHAT_MODEL` | Chat model for the ledger update. Deployment sets the 35B here while the linker runs on the NPU 9B. |
+| `BRAIN_TRUTH_ENABLED` | `0` | If truthy, run `truth_maintenance.py --apply --backfill` (contradiction triage + provenance) **before** the linker. Off by default — run `truth_maintenance.py --dry-run` by hand and gauge precision first. |
+| `TRUTH_CHAT_URL` | value of `LEDGER_CHAT_URL` | Chat endpoint for the NLI/contradiction step (the hardest task — defaults to the ledger's stronger model). |
+| `TRUTH_CHAT_MODEL` | value of `LEDGER_CHAT_MODEL` | Chat model for truth maintenance. |
 | `LM_BASE_URL` | `http://localhost:1234/v1` *(in this function)* | **Re-read from env here** (different default than `config.py`!) to pass `--embed-endpoint`. |
 | `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v2-moe` *(in this function)* | Re-read from env to pass `--embed-model`. |
 | `OBSIDIAN_VAULT_PATH` | `/vault` *(in this function)* | Re-read from env (different default than `config.py`) to pass `--vault`. |
