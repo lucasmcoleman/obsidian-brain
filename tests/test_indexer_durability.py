@@ -50,6 +50,29 @@ def test_scan_vault_strips_moc_linker_managed_blocks(brain_paths, make_note):
     assert "moc-linker" not in a["content"]
 
 
+def test_scan_vault_prepends_note_title(brain_paths, make_note):
+    # In Obsidian the filename IS the title and is often the only place a
+    # person/project name appears; it must reach the embeddings (M-C).
+    make_note("Rekow 1-1 2026-06-30.md", "Discussed the roadmap; surname not in body.")
+    notes = indexer.scan_vault(str(brain_paths["vault"]))
+    n = next(x for x in notes if x["path"] == "Rekow 1-1 2026-06-30.md")
+    assert n["content"].startswith("Rekow 1-1 2026-06-30")
+    assert "Discussed the roadmap" in n["content"]
+
+
+def test_scan_vault_includes_entity_notes(brain_paths, make_note):
+    # Entity notes in _brain/entities/ must be indexed so brain_write_entity content
+    # is retrievable, not write-only (M-D).
+    ent = brain_paths["brain_dir"] / "entities"
+    ent.mkdir(parents=True, exist_ok=True)
+    (ent / "john-smith.md").write_text("John Smith leads Delta.", encoding="utf-8")
+    make_note("regular.md", "a normal note")
+    notes = indexer.scan_vault(str(brain_paths["vault"]))
+    paths = {n["path"] for n in notes}
+    assert "regular.md" in paths
+    assert any(p.replace("\\", "/").endswith("entities/john-smith.md") for p in paths)
+
+
 def test_rebuild_after_note_deletion_drops_stale_chunks(brain_paths, make_note, fake_embed):
     make_note("a.md", "Alpha content about apples.")
     make_note("b.md", "Beta content about bananas.")

@@ -196,6 +196,10 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
             # Strip the linker's managed blocks so generated link boilerplate is
             # never re-embedded (M-E).
             content = _MANAGED_BLOCK_RE.sub("", content).strip()
+            # Prepend the note title (filename stem) so it participates in the
+            # embeddings — in Obsidian the filename is the title and is often the
+            # only place a person/project name appears (M-C).
+            content = f"{rel_path.stem}\n\n{content}".strip()
             notes.append({
                 "path": str(rel_path),
                 "abs_path": str(md_file),
