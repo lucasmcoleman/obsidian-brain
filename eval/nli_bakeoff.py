@@ -30,11 +30,19 @@ LS = "http://192.168.0.29:4004/v1"     # llama-swap
 LM = "http://192.168.0.29:1234/v1"     # LM Studio
 
 # (label, endpoint, model-id-on-that-endpoint)
+# HARDWARE CEILING: this box is a unified-memory APU (~112 GB GTT) already ~48 GB
+# deep in resident AI models. Models > ~30B alongside the 8B embedder OOM/thrash
+# swap and time out — do NOT add them here. gpt-oss-120b (~60 GB) and minimax-139B
+# were tried once and filled swap; kept below only as a documented no-go.
 CANDIDATES = [
-    ("qwen3.6-35b-a3b", LS, "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"),  # current default (3B active)
-    ("qwen3.6-27b",     LS, "unsloth/Qwen3.6-27B-MTP-GGUF"),      # dense 27B (new ledger model)
-    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # 120B MoE — user's contender
-    ("minimax-m2.7",    LS, "mradermacher/m51Lab-MiniMax-M2.7-REAP-139B-A10B-i1-GGUF"),
+    ("qwen3.6-27b",     LS, "unsloth/Qwen3.6-27B-MTP-GGUF"),      # dense 27B — NLI winner + ledger
+    ("qwen3.6-35b-a3b", LS, "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"),  # prior default (3B active)
+    ("step-3.7-flash",  LS, "unsloth/Step-3.7-Flash-GGUF"),       # flash — fits
+]
+# Do NOT enable without freeing memory first — these OOM/thrash swap here:
+_TOO_BIG = [
+    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # ~60 GB
+    ("minimax-m2.7",    LS, "mradermacher/m51Lab-MiniMax-M2.7-REAP-139B-A10B-i1-GGUF"),  # 139B
 ]
 
 # Positive class = "contradicts". Includes the classic false-positive traps the
