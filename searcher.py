@@ -10,7 +10,10 @@ from typing import Optional
 import faiss
 import numpy as np
 
-from config import VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K, EMBED_QUERY_PREFIX
+from config import (
+    VAULT_PATH, BRAIN_DIR, INDEX_PATH, METADATA_PATH, TOP_K, EMBED_QUERY_PREFIX,
+    SEARCH_MAX_TOP_K, SEARCH_MAX_QUERY_CHARS, SEARCH_MIN_SCORE,
+)
 from embedder import embed_query
 from indexer import INDEX_LOCK
 
@@ -24,6 +27,16 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
     Returns [] if the index is absent, unreadable, or inconsistent with its
     metadata (so a crash-window mismatch never returns wrong text — M1/L7/L8).
     """
+    # Harden the arguments: a non-int / negative / absurd top_k would otherwise
+    # flow into faiss.search and raise or over-allocate; an unbounded query wastes
+    # the embed call (audit finding low-9).
+    try:
+        top_k = int(top_k)
+    except (TypeError, ValueError):
+        top_k = TOP_K
+    top_k = max(1, min(top_k, SEARCH_MAX_TOP_K))
+    query = (query or "")[:SEARCH_MAX_QUERY_CHARS]
+
     # Read the index + metadata together under the lock so we never load a
     # new index against stale metadata (or a half-written file) mid-rebuild.
     with INDEX_LOCK:
@@ -57,8 +70,10 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
     query_embedding = embed_query(EMBED_QUERY_PREFIX + query)
     query_vec = np.array([query_embedding]).astype("float32")
 
-    # Search FAISS (retrieve extra so dedup-by-note can still fill top_k)
-    k = min(top_k * 2, index.ntotal)
+    # Retrieve a generous candidate pool so dedup-to-one-chunk-per-note can still
+    # fill top_k even when several of the nearest chunks belong to one big note
+    # (audit finding low-5).
+    k = min(max(top_k * 5, 25), index.ntotal)
     distances, indices = index.search(query_vec, k)
 
     results = []
@@ -68,6 +83,8 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         chunk = chunks[idx]
         # L2 distance to a monotonic similarity score
         score = 1 / (1 + dist)
+        if SEARCH_MIN_SCORE > 0 and score < SEARCH_MIN_SCORE:
+            continue  # relevance floor (opt-in; 0 = keep all) — low-5
         results.append({
             "text": chunk["text"],
             "note_path": chunk["note_path"],

@@ -25,6 +25,11 @@ TOP_K = 5  # number of chunks to retrieve
 EMBED_DOC_PREFIX = os.environ.get("EMBED_DOC_PREFIX", "search_document: ")
 EMBED_QUERY_PREFIX = os.environ.get("EMBED_QUERY_PREFIX", "search_query: ")
 
+# Search argument hardening + quality knobs (audit findings low-9 / low-5).
+SEARCH_MAX_TOP_K = int(os.environ.get("SEARCH_MAX_TOP_K", "100"))       # clamp absurd/negative top_k
+SEARCH_MAX_QUERY_CHARS = int(os.environ.get("SEARCH_MAX_QUERY_CHARS", "4000"))  # bound query size
+SEARCH_MIN_SCORE = float(os.environ.get("SEARCH_MIN_SCORE", "0"))      # drop results below this (0 = off)
+
 # Embedding request hardening (audit findings M4/M5/M6). All env-overridable so a
 # large vault or a slow endpoint can be tuned without editing code.
 EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", "64"))  # texts per request
