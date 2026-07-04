@@ -2,6 +2,7 @@
 Obsidian Brain — main orchestration module.
 Handles context retrieval and write-back to the vault.
 """
+import hashlib
 import json
 import os
 import re
@@ -21,8 +22,11 @@ from safe_paths import (
 
 def _slugify(name: str) -> str:
     """Lowercase, collapse every run of non-alphanumeric characters to a single
-    '-', and strip leading/trailing dashes (audit finding L11)."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    '-', and strip leading/trailing dashes (audit finding L11). Falls back to a
+    stable name-derived hash when the result would be empty (a name with no ASCII
+    alphanumerics), so we never write a bare '.md' dotfile (audit finding low-4)."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+    return slug or ("entity-" + hashlib.sha1(name.encode("utf-8")).hexdigest()[:8])
 
 
 def get_or_build_index() -> dict:
@@ -56,12 +60,27 @@ def write_entity_note(entity_name: str, initial_content: str = "") -> dict:
     filepath = Path(ENTITIES_DIR) / f"{slug}.md"
     filepath.parent.mkdir(parents=True, exist_ok=True)
     if filepath.exists():
-        return {
-            "status": "exists",
-            "slug": slug,
-            "path": str(filepath),
-            "detail": "Entity already exists; not modified. Use append_insight to add to it.",
-        }
+        # If the existing note is for THIS entity, it genuinely exists. If a
+        # different name merely collides on the slug (e.g. "John Smith - client"
+        # vs "John Smith, client"), mint a distinct slug rather than returning
+        # "exists" and silently discarding this call's content (audit finding low-4).
+        heading = filepath.read_text(encoding="utf-8").splitlines()[:1]
+        if heading == [f"# {entity_name}"]:
+            return {
+                "status": "exists",
+                "slug": slug,
+                "path": str(filepath),
+                "detail": "Entity already exists; not modified. Use append_insight to add to it.",
+            }
+        slug = f"{slug}-{hashlib.sha1(entity_name.encode('utf-8')).hexdigest()[:6]}"
+        filepath = Path(ENTITIES_DIR) / f"{slug}.md"
+        if filepath.exists():
+            return {
+                "status": "exists",
+                "slug": slug,
+                "path": str(filepath),
+                "detail": "Entity already exists; not modified. Use append_insight to add to it.",
+            }
 
     content = f"# {entity_name}\n\n"
     if initial_content:
@@ -105,13 +124,14 @@ def append_insight(note_path: str, insight: str, context: str = "") -> dict:
     return {"status": "ok", "path": str(target), "detail": f"Appended insight to {target}"}
 
 
-def consolidate() -> dict:
+def consolidate(force: bool = False) -> dict:
     """
     Nightly 'dream cycle': rebuild the index to incorporate new notes,
     and optionally enrich entity pages (placeholder for future logic).
+    `force=True` re-embeds everything; the default incremental path re-embeds only
+    when the vault or index params changed (audit finding low-3).
     """
-    result = build_index(force=True)
-    return result
+    return build_index(force=force)
 
 
 if __name__ == "__main__":

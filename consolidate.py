@@ -26,7 +26,7 @@ def main():
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{now}] Starting consolidation (force={force})...")
 
-    result = consolidate()
+    result = consolidate(force=force)
 
     print(f"[{now}] Result: {json.dumps(result)}")
 
