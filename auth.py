@@ -16,13 +16,16 @@ from starlette.responses import JSONResponse
 class BearerAuthMiddleware(BaseHTTPMiddleware):
     def __init__(self, app, token: str, public_paths=()):
         super().__init__(app)
-        self._expected = f"Bearer {token}"
+        # Compare as bytes: hmac.compare_digest on str raises TypeError for any
+        # non-ASCII character, which would surface as a 500 instead of a clean 401
+        # (audit finding low-8). Bytes comparison handles any header content.
+        self._expected = f"Bearer {token}".encode("utf-8")
         self.public_paths = set(public_paths)
 
     async def dispatch(self, request, call_next):
         if request.url.path in self.public_paths:
             return await call_next(request)
-        presented = request.headers.get("authorization", "")
+        presented = request.headers.get("authorization", "").encode("utf-8")
         # Constant-time compare to avoid leaking the secret via timing.
         if not hmac.compare_digest(presented, self._expected):
             return JSONResponse({"error": "unauthorized"}, status_code=401)

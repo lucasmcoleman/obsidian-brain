@@ -38,3 +38,23 @@ def test_protected_path_allows_correct_token():
     r = c.post("/mcp", headers={"Authorization": "Bearer s3cr3t"})
     assert r.status_code == 200
     assert r.json() == {"tool": "ran"}
+
+
+def test_non_ascii_authorization_header_is_401_not_500():
+    # A raw header with a non-latin-1/high byte decodes (latin-1) to a non-ASCII
+    # str; hmac.compare_digest on a non-ASCII str raises TypeError. Drive dispatch
+    # directly (httpx would reject the header client-side) and require a clean 401,
+    # not a raised TypeError / 500 (audit finding low-8).
+    import asyncio
+    from starlette.requests import Request
+
+    async def _call_next(_req):
+        return JSONResponse({"tool": "ran"})
+
+    mw = BearerAuthMiddleware(app=None, token="s3cr3t", public_paths={"/health"})
+    scope = {
+        "type": "http", "method": "POST", "path": "/mcp",
+        "headers": [(b"authorization", b"Bearer \xff\xfe")],
+    }
+    resp = asyncio.run(mw.dispatch(Request(scope), _call_next))
+    assert resp.status_code == 401
