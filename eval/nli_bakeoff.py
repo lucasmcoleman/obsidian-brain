@@ -115,7 +115,10 @@ def main() -> int:
     ap.add_argument("--verbose", action="store_true", help="print per-case results")
     args = ap.parse_args()
 
-    cands = [c for c in CANDIDATES if not args.only or c[0] in args.only]
+    # Default run uses only the fitting CANDIDATES; the oversized ones in _TOO_BIG
+    # are reachable ONLY via explicit --only (so you free memory first).
+    pool = CANDIDATES + (_TOO_BIG if args.only else [])
+    cands = [c for c in pool if not args.only or c[0] in args.only]
     results = []
     for label, endpoint, model in cands:
         print(f"\n### {label}  ({model} @ {endpoint})", flush=True)
