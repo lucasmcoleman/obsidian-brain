@@ -17,3 +17,4 @@ obsidian_brain.py
 venv/
 .pytest_cache/
 tests/
+plugin/
