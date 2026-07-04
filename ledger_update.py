@@ -172,6 +172,29 @@ def _normalize(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").lower()).strip()
 
 
+def _dedup_norm(s: str) -> str:
+    """Normalize punctuation to spaces for the new-item dedup backstop."""
+    return re.sub(r"\W+", " ", (s or "").lower()).strip()
+
+
+def filter_new_items(new_items: list[dict], existing_body: str) -> list[dict]:
+    """Drop proposed new items already present in the ledger body. Normalizes BOTH
+    the candidate key and the haystack the same way, so an item with punctuation
+    ('/', '-', …) in its first 40 chars can't evade the substring check and get
+    re-appended every night (audit finding low-6)."""
+    existing = _dedup_norm(existing_body)
+    out = []
+    for it in new_items:
+        t = (it.get("text") or "").strip()
+        if not t:
+            continue
+        key = _dedup_norm(t)
+        if key and key[:40] in existing:
+            continue
+        out.append(it)
+    return out
+
+
 # Words too generic (or too completion-verb-ish) to bind an evidence quote to a
 # specific item — excluded when checking that the quote is actually ABOUT the item.
 _BINDING_STOPWORDS = {
@@ -454,16 +477,7 @@ def main() -> int:
     existing_auto = "\n".join(auto_lines)  # carry the in-place auto-block edits forward
 
     # --- New items: dedupe against existing ledger text, append to managed block ---
-    existing_blob = body.lower()
-    new_items = []
-    for it in result.get("new_items", []):
-        t = (it.get("text") or "").strip()
-        if not t:
-            continue
-        key = re.sub(r"\W+", " ", t.lower()).strip()
-        if key and key[:40] in existing_blob:
-            continue
-        new_items.append(it)
+    new_items = filter_new_items(result.get("new_items", []), body)
 
     # --- Report ---
     print(f"Completions detected: {len(completed)}")

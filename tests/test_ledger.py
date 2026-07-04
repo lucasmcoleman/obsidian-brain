@@ -16,6 +16,21 @@ def test_find_json_object_returns_none_when_no_keyed_object():
     assert lu.find_json_object("no json here") is None
 
 
+def test_filter_new_items_dedups_punctuated_item():
+    # The dedup key normalizes punctuation to spaces, so the haystack must be
+    # normalized the same way — otherwise an item with '/' etc. in its first 40
+    # chars evades the backstop and is re-appended nightly (audit finding low-6).
+    body = "## tracked\n- [ ] Draft AI/PII incident response playbook\n"
+    items = [
+        {"text": "Draft AI/PII incident response playbook"},  # already tracked
+        {"text": "Book the Q4 offsite venue"},                # genuinely new
+    ]
+    out = lu.filter_new_items(items, body)
+    texts = [i["text"] for i in out]
+    assert "Draft AI/PII incident response playbook" not in texts
+    assert "Book the Q4 offsite venue" in texts
+
+
 def test_find_json_object_handles_single_object():
     obj = lu.find_json_object('{"completed": [], "new_items": [{"text": "x"}]}')
     assert obj["new_items"] == [{"text": "x"}]
