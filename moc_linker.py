@@ -150,28 +150,61 @@ def discover_mocs(vault: Path) -> list[str]:
 # ----------------------------------------------------------------------------
 # Local model client
 # ----------------------------------------------------------------------------
+def _iter_json_objects(text: str):
+    """Yield every balanced top-level {...} object in text, tracking JSON string
+    state so braces INSIDE quoted values (even unbalanced ones) don't throw off
+    the depth count. The old non-nested-brace regex could not match any object
+    containing a brace at all — a Templater brace pair, a dict/LaTeX snippet, or a
+    stray closing brace in a quoted value silently dropped the note to Unsorted
+    forever (audit finding M-I)."""
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                        if isinstance(obj, dict):
+                            yield obj
+                    except json.JSONDecodeError:
+                        pass
+                    break
+        start = text.find("{", start + 1)
+
+
 def extract_json(content: str) -> Optional[dict]:
-    """Pull the first JSON object out of a model response."""
+    """Pull the answer JSON object out of a model response. Prefers the LAST
+    balanced object carrying a "moc" key (reasoning models often echo the template
+    before the real answer)."""
     if not content:
         return None
     content = re.sub(r"^```(?:json)?|```$", "", content.strip(), flags=re.M).strip()
     # Strip any stray <think> blocks that leaked into content.
     content = re.sub(r"<think>.*?</think>", "", content, flags=re.S).strip()
-    # Collect candidate {...} objects; prefer the LAST one that parses and has
-    # a "moc" key (reasoning text often shows the template before the answer).
-    candidates = re.findall(r"\{[^{}]*\}", content, flags=re.S)
-    last_any = None
-    last_with_moc = None
-    for cand in candidates:
-        try:
-            obj = json.loads(cand)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(obj, dict):
-            last_any = obj
-            if obj.get("moc"):
-                last_with_moc = obj
-    return last_with_moc or last_any
+    objects = list(_iter_json_objects(content))
+    if not objects:
+        return None
+    for obj in reversed(objects):
+        if obj.get("moc"):
+            return obj
+    return objects[-1]
 
 
 def classify_note(
@@ -240,6 +273,19 @@ def classify_note(
 # ----------------------------------------------------------------------------
 # Writing MOC files
 # ----------------------------------------------------------------------------
+# The managed blocks carry a minute-resolution "*Updated <ts> by moc_linker*"
+# stamp that changes every run. Comparing note content with the stamp lines
+# stripped lets an idempotent night detect "nothing but the timestamp would
+# change" and skip the write, so unchanged notes don't have their mtime bumped
+# every night — which otherwise defeats the ledger's recency filter and forces a
+# full whole-vault re-embed (audit finding H-B).
+_STAMP_RE = re.compile(r"^\*Updated .* by moc_linker.*\*\s*$", re.M)
+
+
+def _without_stamps(text: str) -> str:
+    return _STAMP_RE.sub("", text)
+
+
 def render_managed_block(entries: list[dict]) -> str:
     lines = [MANAGED_BEGIN, f"*Updated {datetime.now():%Y-%m-%d %H:%M} by moc_linker.*", ""]
     for e in sorted(entries, key=lambda x: x["title"].lower()):
@@ -255,8 +301,19 @@ def upsert_managed_block(existing: str, block: str, title: str) -> str:
     pattern = re.compile(
         re.escape(MANAGED_BEGIN) + r".*?" + re.escape(MANAGED_END), flags=re.S
     )
+    if len(pattern.findall(existing)) > 1:
+        # More than one managed pair (a LiveSync conflict merge, or a note that
+        # quotes the markers) — replacing all would destroy the extra content.
+        # Refuse and leave it for a human (audit finding low-7).
+        print("[moc_linker] multiple managed blocks found; skipping to avoid data loss",
+              file=sys.stderr)
+        return existing
     if pattern.search(existing):
-        return pattern.sub(block, existing).rstrip() + "\n"
+        # `block` carries model-generated desc/titles; pass it as a function
+        # replacement so backslashes / \1 group-refs are inserted verbatim
+        # rather than interpreted as a re.sub template (audit finding H-A). count=1
+        # so only the single managed pair is touched.
+        return pattern.sub(lambda _m: block, existing, count=1).rstrip() + "\n"
     header = existing.strip()
     if not header:
         header = f"# {title}"
@@ -283,10 +340,18 @@ def backup_file(path: Path, backup_dir: Path) -> Optional[Path]:
     return dest
 
 
-def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
+def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool,
+               all_mocs: Optional[list[str]] = None) -> None:
     moc_dir = vault / MOC_SUBDIR
     backup_dir = backup_root(vault) / "mocs"
-    for moc_name, entries in sorted(by_moc.items()):
+    # Regenerate EVERY known MOC each run (empty block for ones that got zero notes
+    # this run), so a note reclassified elsewhere is removed from its former MOC
+    # instead of being left dangling in two MOCs (audit finding M-J). Otherwise
+    # write_mocs only rewrites MOCs that received >=1 note this run.
+    targets = dict(by_moc)
+    for m in (all_mocs or []):
+        targets.setdefault(m, [])
+    for moc_name, entries in sorted(targets.items()):
         if moc_name == "Unsorted":
             continue  # surfaced in the report, not written to a MOC
         path = moc_dir / f"{moc_name}.md"
@@ -295,6 +360,9 @@ def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
         new_content = upsert_managed_block(existing, block, moc_name)
         print(f"\n=== {moc_name}.md ({len(entries)} notes) ===")
         if apply:
+            if _without_stamps(new_content) == _without_stamps(existing):
+                print(f"  unchanged, skipped {path.relative_to(vault)}")  # H-B: no mtime churn
+                continue
             b = backup_file(path, backup_dir)
             if b:
                 print(f"  backed up -> {b}")
@@ -303,6 +371,47 @@ def write_mocs(vault: Path, by_moc: dict[str, list[dict]], apply: bool) -> None:
         else:
             preview = "\n".join(new_content.splitlines()[:12])
             print(preview + ("\n  ..." if len(new_content.splitlines()) > 12 else ""))
+
+
+_FM_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.S)
+
+
+def _looks_like_frontmatter(head: str) -> bool:
+    """True only if the block between leading '---' fences is really YAML
+    frontmatter (its first non-empty line is a key), not body content sitting
+    between two '---' thematic breaks (audit finding M-H)."""
+    for line in head.splitlines():
+        if not line.strip():
+            continue
+        return bool(re.match(r"^[ \t]*[A-Za-z0-9_.\-]+[ \t]*:", line))
+    return False
+
+
+def _set_frontmatter_moc(text: str, link: str) -> str:
+    """Set `moc: <link>` in a note's frontmatter without corrupting it:
+
+    - Only treats a leading '---' block as frontmatter when it really is one, so a
+      note that merely OPENS with a '---' divider doesn't get its body hoisted in.
+    - Replaces an existing `moc:` key AND any indented/list continuation lines
+      under it, so a block/list-form `moc:` value isn't left as an orphaned,
+      invalid-YAML list item beneath the new scalar (audit finding M-H).
+    """
+    m = _FM_RE.match(text)
+    if not m or not _looks_like_frontmatter(m.group(1)):
+        return f"---\nmoc: {link}\n---\n\n{text}"
+    head, rest = m.group(1), text[m.end():]
+    out, dropping = [], False
+    for line in head.splitlines():
+        if re.match(r"^moc[ \t]*:", line):
+            dropping = True  # drop the moc key and its block/list continuation
+            continue
+        if dropping:
+            if re.match(r"^([ \t]+\S|[ \t]*-[ \t])", line):
+                continue
+            dropping = False
+        out.append(line)
+    out.append(f"moc: {link}")
+    return "---\n" + "\n".join(out) + "\n---\n" + rest
 
 
 def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
@@ -314,16 +423,10 @@ def tag_notes(vault: Path, results: list[dict], apply: bool) -> None:
         path: Path = r["abs"]
         text = path.read_text(encoding="utf-8")
         link = f'"[[{r["moc"]}]]"'
-        if text.startswith("---") and "\n---" in text:
-            head, _, rest = text[3:].partition("\n---")
-            if re.search(r"^moc:", head, flags=re.M):
-                new_head = re.sub(r"^moc:.*$", f"moc: {link}", head, flags=re.M)
-            else:
-                new_head = head.rstrip("\n") + f"\nmoc: {link}\n"
-            new_text = f"---{new_head}\n---{rest}"
-        else:
-            new_text = f"---\nmoc: {link}\n---\n\n{text}"
+        new_text = _set_frontmatter_moc(text, link)
         if apply:
+            if new_text == text:
+                continue  # moc: already correct; skip to avoid mtime churn (H-B)
             backup_dir.mkdir(parents=True, exist_ok=True)
             (backup_dir / f"{path.stem}.bak.md").write_text(text, encoding="utf-8")
             path.write_text(new_text, encoding="utf-8")
@@ -371,8 +474,17 @@ def render_related_block(neighbors: list[dict]) -> str:
 def upsert_related_block(text: str, block: str) -> str:
     """Replace the managed Related block, or append it at the end of the note."""
     pattern = re.compile(re.escape(RELATED_BEGIN) + r".*?" + re.escape(RELATED_END), flags=re.S)
+    if len(pattern.findall(text)) > 1:
+        # Multiple related pairs (LiveSync conflict merge or a note quoting the
+        # markers): refuse rather than replace-all and destroy content (low-7).
+        print("[moc_linker] multiple related blocks found; skipping to avoid data loss",
+              file=sys.stderr)
+        return text
     if pattern.search(text):
-        return pattern.sub(block, text).rstrip() + "\n"
+        # Function replacement: model-generated block inserted verbatim, never
+        # interpreted as a re.sub replacement template (audit finding H-A). count=1
+        # touches only the single managed pair.
+        return pattern.sub(lambda _m: block, text, count=1).rstrip() + "\n"
     return text.rstrip() + "\n\n" + block + "\n"
 
 
@@ -406,6 +518,8 @@ def cross_link(notes: list[dict], endpoint: str, model: str, top_k: int,
         original = path.read_text(encoding="utf-8")
         new_text = upsert_related_block(original, block)
         if apply:
+            if _without_stamps(new_text) == _without_stamps(original):
+                continue  # same neighbors; only the stamp differs — skip (H-B)
             # backups live OUTSIDE the vault so Obsidian never indexes them
             bdir = _related_backup_dir(note)
             bdir.mkdir(parents=True, exist_ok=True)
@@ -494,7 +608,7 @@ def main() -> int:
         if not by_moc.get("Unsorted"):
             by_moc.pop("Unsorted", None)
 
-        write_mocs(vault, by_moc, apply)
+        write_mocs(vault, by_moc, apply, all_mocs=mocs)
         if args.tag_notes:
             tag_notes(vault, results, apply)
 

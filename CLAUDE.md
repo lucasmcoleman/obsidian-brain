@@ -4,13 +4,144 @@ description: "Query Lucas's Obsidian vault for personal context, record new enti
 trigger: "when answering questions about people, projects, decisions, or past conversations; or when Lucas says 'remember that' / 'I decided'"
 ---
 
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this
+repository. It is **also loaded as a skill** (see the frontmatter above) — keep the frontmatter
+at the top of the file or skill loading breaks.
+
 # Obsidian Brain
 
-Use this skill to access Lucas Coleman's personal knowledge base — an indexed Obsidian vault of markdown notes.
+A persistent, agent-native knowledge layer over an Obsidian vault. The vault's `.md` files are
+the source of truth — there is no separate database. The agent decides when to query; there are
+no user-facing commands. Embeddings are generated locally (LM Studio / llama-swap), so there is
+zero cloud/API cost or dependency.
 
-## Vault Access
+There are **two distinct audiences** for this file:
+1. **Working on the code** — see "Development" and "Architecture" below.
+2. **Consuming the brain as an agent** — see "Using the brain" below.
 
-The vault is available via an MCP server. Add to your Claude Code MCP config (`~/.claude/settings.json`):
+## Development
+
+There is no linter or build step; development is otherwise run-and-observe. A
+`pytest` suite lives under `tests/` (temp vault + deterministic in-process fake
+embedder — no network or real vault needed). **Use TDD: write the failing test first.**
+
+```bash
+python -m pytest tests/ -q                          # run the test suite
+
+export OBSIDIAN_VAULT_PATH=/server/obsidian        # required by every entry point
+
+python indexer.py --force                          # (re)build the FAISS index from scratch
+python searcher.py "what did Lucas decide about X" # one-off semantic search from the CLI
+python brain.py                                    # smoke test: build index + sample query
+python consolidate.py --force                      # full rebuild (external cron entry point)
+
+python mcp_server.py                               # MCP server over stdio (local agents)
+python mcp_server.py --http                        # MCP server, streamable-HTTP :8000/mcp
+
+# Nightly vault maintenance (need a local OpenAI-compatible CHAT model, not just embeddings):
+python moc_linker.py --dry-run                     # preview MOC classification + Related links
+python moc_linker.py --apply --tag-notes --related
+python ledger_update.py --dry-run                  # preview action-item ledger changes
+python ledger_update.py --apply
+
+# Container (the real deployment — see deploy/README.md):
+cd /server/docker/compose/mcp && docker compose up -d --build obsidian-brain-mcp
+```
+
+Prerequisites: Python 3.11+ and LM Studio reachable at `LM_BASE_URL`
+(default `http://192.168.0.29:1234/v1`) with the embedding model loaded. Without a running
+embedding endpoint, indexing and search fail.
+
+## Architecture
+
+Single-responsibility modules layered under one orchestrator:
+
+```
+config.py     paths + LM Studio settings, all env-driven (OBSIDIAN_VAULT_PATH is central)
+embedder.py   OpenAI-compatible client → LM Studio /v1/embeddings (singleton client)
+indexer.py    scan_vault → chunk_text → embed → FAISS IndexFlatL2 + metadata.json
+searcher.py   embed query → FAISS L2 search → score 1/(1+dist) → dedupe by note
+brain.py      orchestration: query_brain / write_entity_note / append_insight / consolidate
+tasks.py      deterministic checkbox scanner (scan/count/complete) — NOT semantic
+mcp_server.py FastMCP server exposing all of the above as tools (stdio or streamable-HTTP)
+```
+
+Things that span multiple files and are easy to get wrong:
+
+- **Where index data lives.** The index is written *inside the vault* at `_brain/index.faiss`
+  + `_brain/metadata.json` (`config.py`). `scan_vault` and the task scanner both **skip any
+  path containing `_brain`**, so brain-generated files are never re-indexed. `_brain/` is
+  gitignored by Obsidian LiveSync and replicated separately from notes.
+
+- **Concurrency model.** `indexer.INDEX_LOCK` (an `RLock`) is shared by `indexer` and
+  `searcher` for in-process readers; a cross-process `fcntl` lock (`_build_lock`) serializes
+  whole builds so a manual `consolidate.py`/`indexer.py --force` can't interleave its swap with
+  the scheduler's. The *heavy* work (scan + embed) runs outside `INDEX_LOCK`; only the brief
+  read (search) and the atomic file swap hold it. `build_index` writes `*.tmp` then `os.replace`s,
+  cleans up leftover `*.tmp` on the next build, and `search` guards `index.ntotal == len(chunks)`
+  (returning `[]` + a "rebuild needed" log on mismatch) so a crash between the two `os.replace`s
+  never yields wrong text. Preserve these invariants.
+
+- **Incremental rebuild.** `build_index(force=False)` compares a `vault_signature` (hash of the
+  sorted set of relpaths + mtimes) so deletions/renames trigger a rebuild — not just `max(mtime)`.
+  `--force` / `force=True` re-embeds all. Embeddings are batched (`EMBED_BATCH_SIZE`) with
+  per-batch backoff retry (`EMBED_MAX_RETRIES`) and an explicit `EMBED_TIMEOUT`.
+
+- **Chunking.** `chunk_text` splits on sentence boundaries (`.!?`), not token counts, for
+  semantic coherence; tokens are approximated as `words * 1.3`. Frontmatter is stripped in
+  `scan_vault` before chunking.
+
+- **Retrieval.** FAISS returns by L2 distance; `search` retrieves `2*top_k`, converts distance
+  to a `1/(1+dist)` score, then **dedupes to one chunk per note** before returning `top_k`.
+  Semantic search finds *relevant* notes; `tasks.py` is the separate, exhaustive path for
+  "every checkbox" questions — don't use semantic search when completeness matters.
+
+- **Two index-refresh paths.** (1) `consolidate.py` as an external cron entry; (2) a daemon
+  thread baked into `mcp_server.py` that, *only in HTTP mode*, rebuilds ~30s after boot and then
+  nightly at `BRAIN_REFRESH_AT_HOUR`, after which it runs `moc_linker.py` + `ledger_update.py`
+  as subprocesses. All toggled by `BRAIN_*` env vars; every step is isolated so one failure
+  only logs and never kills the thread.
+
+- **Maintenance scripts are deliberately pure-stdlib + reversible.** `moc_linker.py` and
+  `ledger_update.py` use only `urllib`/`json` (no `openai` dep), call a local *chat* model, work
+  inside managed `<!-- ... -->` blocks for idempotency, and back up files **outside the vault**
+  (so Obsidian/LiveSync never index the backups). `ledger_update.py` imports helpers from
+  `moc_linker.py`. Keep edits surgical and reversible.
+
+- **`obsidian_brain.py` is legacy.** The original self-contained pure-stdlib JSON-index
+  prototype, superseded by the modular FAISS pipeline. Nothing imports it; don't extend it.
+
+## MCP server
+
+`mcp_server.py` is the production interface. Tool names/behavior are identical across both
+transports; transport is chosen by `--http`/`--stdio` or `MCP_TRANSPORT` (default `stdio`).
+HTTP mode runs **stateless** (`stateless_http`, override with `BRAIN_STATELESS_HTTP=0`) to avoid
+session-expiry churn, and exposes `GET /health` for container probes. All tools are thin
+wrappers over `brain.py` + `tasks.py`.
+
+- **Auth:** set `BRAIN_AUTH_TOKEN` to require `Authorization: Bearer <token>` on every HTTP
+  request except `/health` (middleware in `auth.py`, wired via `_build_http_app`). Unset = no
+  auth (a startup warning is logged); restrict the port to a trusted network in that case.
+- **Write safety:** `brain_append_insight` / `brain_complete_task` confine writes to the vault
+  via `safe_paths.resolve_in_vault` (reject `..`/absolute escapes + non-`.md`, follow symlinks),
+  preserve line endings, and write atomically. `brain_append_insight` / `brain_write_entity`
+  return structured JSON (`status` `ok`/`error`/`created`/`exists`) — branch on it.
+
+| Tool | Purpose |
+|------|---------|
+| `brain_query(query, top_k=5)` | Semantic retrieval. Synthesize results into your answer; don't paste raw. |
+| `brain_tasks(status, query)` | Exhaustive checkbox list (`open`/`done`/`all`), optional substring filter. Use instead of `brain_query` for "what are my open tasks". |
+| `brain_complete_task(note_path, match)` | Flip one open `- [ ]` to `- [x] … ✅ <date>` in place; errors if `match` isn't unique. |
+| `brain_write_entity(name, initial_content)` | Create `_brain/entities/<slug>.md` (slug = lowercased, spaces/`/` → `-`). |
+| `brain_append_insight(note_path, insight, context)` | Append a timestamped `## Brain Insight` block to an existing note. |
+| `brain_build_index(force)` | Rebuild when notes changed externally and results look stale. |
+| `brain_status()` | Vault path, embedding model, index stats, entity + task counts. |
+
+## Using the brain (as a consuming agent)
+
+Register over stdio in `~/.claude/settings.json`:
 
 ```json
 {
@@ -18,78 +149,28 @@ The vault is available via an MCP server. Add to your Claude Code MCP config (`~
     "obsidian-brain": {
       "command": "python3",
       "args": ["/server/programming/obsidian-brain/mcp_server.py"],
-      "env": {
-        "OBSIDIAN_VAULT_PATH": "/server/obsidian"
-      }
+      "env": { "OBSIDIAN_VAULT_PATH": "/server/obsidian" }
     }
   }
 }
 ```
 
-Or run directly:
-```bash
-OBSIDIAN_VAULT_PATH=/server/obsidian python3 /server/programming/obsidian-brain/mcp_server.py
-```
+For the remote HTTP deployment: `{ "mcpServers": { "obsidian-brain": { "url": "http://<host>:8053/mcp" } } }`.
 
-For remote access (other machines), serve via SSH port forward:
-```bash
-ssh user@server -L 8765:localhost:8765  # then connect to localhost:8765
-```
+**Query the vault when:** a question mentions a person/project/client/company; asks what Lucas
+decided/agreed/concluded; references past notes, meetings, or conversations; or Lucas says
+"remember that…" / "I decided…". **Skip it for** general world knowledge or anything answerable
+from the current conversation.
 
-## When to Use
-
-**Invoke this skill when:**
-- A question mentions a person, project, client, or company
-- A question asks what Lucas decided, agreed to, or concluded
-- A question references something Lucas has been working on or discussed
-- A question asks about past notes, meetings, or conversations
-- Lucas says "remember that..." or "I decided..."
-- You learn something new that should be recorded for future reference
-
-**Skip this skill when:**
-- General world knowledge (geography, definitions, math)
-- Questions clearly answerable from the current conversation alone
-- Coding or technical questions unrelated to Lucas's personal context
-
-## MCP Tools Available
-
-### `brain_query` — Retrieve relevant context
-```json
-{"query": "what did Lucas decide about the Delta Heartland project", "top_k": 5}
-```
-Returns formatted context from relevant vault notes. Incorporate naturally into your answer — do not paste raw context verbatim.
-
-### `brain_write_entity` — Create an entity note
-```json
-{"name": "Sarah Chen", "initial_content": "Environmental scientist, SWCA team lead on Delta Heartland project."}
-```
-Creates `_brain/entities/sarah-chen.md`. Use for new people, projects, or concepts worth tracking.
-
-### `brain_append_insight` — Record a new fact
-```json
-{"note_path": "/server/obsidian/Projects/Delta Heartland.md", "insight": "Lucas prefers biweekly check-ins over daily standups.", "context": "Discussion about team cadence on 2026-06-15"}
-```
-Appends to an existing note's "Brain Insight" section.
-
-### `brain_build_index` — Rebuild the search index
-```json
-{"force": true}
-```
-Use if new notes were added externally and retrieval results seem stale.
-
-### `brain_status` — Check index health
-Returns vault path, embedding model, notes indexed, chunks, and entity count.
-
-## Important Conventions
-
-- Entity names are slugified: "Sarah Chen" → `sarah-chen.md`
-- Insights are appended with a timestamp and optional context field
-- The `_brain/` directory is gitignored by Obsidian LiveSync — index files sync separately from notes
-- When in doubt, ask before writing — unless Lucas explicitly says "remember this"
+**Write conventions:** confirm with the user before writing (`write_entity`, `append_insight`,
+`complete_task`) **unless** they explicitly said to remember it / that it's done. Entity names
+are slugified; insights are timestamped and appended (never overwrite).
 
 ## Tech Stack
 
-- Vault: `/server/obsidian` (Obsidian LiveSync)
-- Index: FAISS (768-dim vectors via `text-embedding-nomic-embed-text-v2-moe` on LM Studio)
-- Local model: LM Studio at `http://192.168.0.29:1234/v1`
-- Nightly rebuild: 2 AM ET Mon-Fri via `consolidate.py`
+- Vault: `/server/obsidian` (Obsidian LiveSync); index in `_brain/` syncs separately from notes
+- Index: FAISS `IndexFlatL2`, 768-dim vectors
+- Embeddings: `text-embedding-nomic-embed-text-v2-moe` via LM Studio (OpenAI-compatible)
+- Maintenance chat model: a reasoning model via llama-swap (emits `reasoning_content` + `content`)
+- Deps: `faiss-cpu`, `numpy`, `openai`, `requests`, `mcp>=1.26.0`, `uvicorn`
+- Deployment: containerized streamable-HTTP, host `8053` → container `8000`; see `deploy/README.md`

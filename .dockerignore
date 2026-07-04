@@ -9,4 +9,12 @@ README.md
 SKILL.md
 obsidian-brain.md
 CLAUDE.md
+AUDIT_*.md
+obsidian_brain.py
 .git/
+.github/
+.venv/
+venv/
+.pytest_cache/
+tests/
+plugin/

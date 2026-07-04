@@ -1,6 +1,6 @@
 ---
-name: obsidian-brain
-description: "Obsidian Brain — a persistent knowledge layer over Lucas's Obsidian vault. Invoke automatically (no special commands) whenever vault context could improve an answer, or when something worth remembering emerges. Backed by an MCP server exposing semantic search + write-back."
+name: obsidian-brain-usage
+description: "Obsidian Brain — a persistent knowledge layer over Lucas's Obsidian vault. Invoke automatically (no special commands) whenever vault context could improve an answer, or when something worth remembering emerges. Backed by an MCP server exposing semantic search + write-back. (Consuming-agent skill; the CLAUDE.md dev skill is named `obsidian-brain` — distinct names avoid a manifest collision.)"
 platforms: [linux, macos, windows]
 ---
 

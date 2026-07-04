@@ -26,6 +26,14 @@ RUN pip install -r requirements.txt
 # Application code (brain modules + MCP server).
 COPY *.py ./
 
+# Run as a non-root user (audit finding M3). UID defaults to 1000 to match the
+# host vault owner so the bind-mounted vault + backups stay writable; override
+# with --build-arg BRAIN_UID=<host-uid> if your vault is owned differently.
+ARG BRAIN_UID=1000
+RUN useradd -m -u ${BRAIN_UID} -s /usr/sbin/nologin brain \
+    && chown -R brain /app
+USER brain
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
