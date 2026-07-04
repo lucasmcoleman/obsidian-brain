@@ -18,6 +18,7 @@ import json
 import random
 import re
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,27 +65,39 @@ def main() -> int:
         body = _neutralize_untrusted(n["body"][:BODY_CHARS])
         user = (f"NOTE (title: {n['title']}):\n{NOTE_FENCE}\n{body}\n{NOTE_FENCE}\n\n"
                 'Return JSON: {"query": "<the search query>"} /no_think')
-        try:
-            resp = ml._post_json(f"{args.endpoint}/chat/completions", {
-                "model": args.model,
-                "messages": [{"role": "system", "content": SYS},
-                             {"role": "user", "content": user}],
-                "temperature": 0.3, "max_tokens": 400,
-            }, args.timeout)
-            msg = resp["choices"][0]["message"]
-            parsed = find_json_object(msg.get("content", "") or "") or \
-                find_json_object(msg.get("reasoning_content", "") or "")
-            q = (parsed or {}).get("query", "").strip()
-            # Reject junk: too short, or just the title echoed back.
-            if len(q) < 12 or q.lower() == n["title"].lower():
-                failures += 1
-                continue
-            q = re.sub(r"\s+", " ", q)
-            golden.append({"query": q, "expected": n["rel"], "source": "generated"})
-            print(f"  [{len(golden):>2}/{args.n}] {n['rel']}\n        ↳ {q}")
-        except Exception as e:  # noqa: BLE001
+        q = ""
+        # Retry with backoff: llama-swap returns 503 while a model (esp. the NPU
+        # one) is still loading, and reasoning models need a couple of attempts'
+        # patience — don't write a note off on the first error.
+        for attempt in range(1, 4):
+            try:
+                resp = ml._post_json(f"{args.endpoint}/chat/completions", {
+                    "model": args.model,
+                    "messages": [{"role": "system", "content": SYS},
+                                 {"role": "user", "content": user}],
+                    # Generous budget: reasoning models that ignore /no_think spend
+                    # tokens thinking before the JSON; 400 truncated to empty.
+                    "temperature": 0.3, "max_tokens": 1600,
+                }, args.timeout)
+                msg = resp["choices"][0]["message"]
+                parsed = find_json_object(msg.get("content", "") or "") or \
+                    find_json_object(msg.get("reasoning_content", "") or "")
+                q = (parsed or {}).get("query", "").strip()
+                if q:
+                    break
+                print(f"  ! {n['rel']}: no query in response (attempt {attempt}, "
+                      f"finish={resp['choices'][0].get('finish_reason')})", file=sys.stderr)
+            except Exception as e:  # noqa: BLE001
+                print(f"  ! {n['rel']}: {e} (attempt {attempt})", file=sys.stderr)
+                time.sleep(15 * attempt)
+        # Reject junk LOUDLY: too short, or just the title echoed back.
+        if len(q) < 12 or q.lower() == n["title"].lower():
             failures += 1
-            print(f"  ! {n['rel']}: {e}", file=sys.stderr)
+            print(f"  ! {n['rel']}: rejected ({q!r})", file=sys.stderr)
+            continue
+        q = re.sub(r"\s+", " ", q)
+        golden.append({"query": q, "expected": n["rel"], "source": "generated"})
+        print(f"  [{len(golden):>2}/{args.n}] {n['rel']}\n        ↳ {q}")
 
     Path(args.out).write_text(json.dumps(golden, indent=2, ensure_ascii=False) + "\n",
                               encoding="utf-8")
