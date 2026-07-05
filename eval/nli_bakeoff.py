@@ -32,20 +32,28 @@ LM = "http://192.168.0.29:1234/v1"     # LM Studio
 # (label, endpoint, model-id-on-that-endpoint)
 # NOTES for this box (Strix Halo APU, ~112 GB GTT):
 # - Run ONE model at a time (concurrent loads thrash swap; keep the box quiet).
-# - gpt-oss-120b: do NOT test via LM Studio (:1234) — its generic ROCm runtime
-#   HANGS this 120B MoE on the APU (prompt-processing stuck at ~0% GPU, CPU spins).
-#   The working path is the strix-halo-club custom FP4 llama.cpp build (docker), but
-#   it isn't exposed on the running llama-swap :4004 — wire it up before testing.
-# - Moot anyway: qwen3.6-27b already scored precision 1.00 / recall 1.00, so nothing
-#   can BEAT it on this set — a bigger model can only tie, slower.
+# - gpt-oss-120b IS a viable, fast contender here — but the RUNTIME matters:
+#     * LM Studio ROCm runtime (amd-rocm-avx2) HANGS this 120B MoE (prompt-
+#       processing stuck at ~0% GPU, CPU spins) — the earlier "DNF/too slow".
+#     * LM Studio VULKAN runtime (vulkan-avx2@2.24.0) RUNS it well: ~17 tok/s
+#       warm, ~6.7 s/NLI-case, GPU actually engaged. Select it first:
+#         lms runtime select llama.cpp-linux-x86_64-vulkan-avx2@2.24.0
+#       then restore ROCm for the embedder afterward (rocm is the validated path).
+#   Tested 2026-07-04 on Vulkan: precision 0.83 / recall 1.00 — ONE false positive
+#   on the plan->completion trap ("planning to migrate" vs "migration complete",
+#   conf 0.95). So it's fast and correct on real contradictions but trips the exact
+#   trap the design guards against.
+# - qwen3.6-27b still wins: precision 1.00 / recall 1.00, no FP. Precision is what
+#   matters for this task, so 27b stays the truth/ledger model; gpt-oss can only tie
+#   at best and here it loses a precision point. Kept below for reproducibility.
 CANDIDATES = [
     ("qwen3.6-27b",     LS, "unsloth/Qwen3.6-27B-MTP-GGUF"),      # dense 27B — NLI winner + ledger/truth
     ("qwen3.6-35b-a3b", LS, "unsloth/Qwen3.6-35B-A3B-MTP-GGUF"),  # prior default (3B active)
     ("step-3.7-flash",  LS, "unsloth/Step-3.7-Flash-GGUF"),       # flash — DNF (no usable JSON)
 ]
-# Reachable via --only, but see notes above before using:
+# Reachable via --only. gpt-oss-120b needs the Vulkan runtime selected first (see notes).
 _TOO_BIG = [
-    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # hangs on LM Studio's runtime here
+    ("gpt-oss-120b",    LM, "openai/gpt-oss-120b"),               # Vulkan: 0.83 prec (1 FP); ROCm: hangs
     ("minimax-m2.7",    LS, "mradermacher/m51Lab-MiniMax-M2.7-REAP-139B-A10B-i1-GGUF"),  # 139B
 ]
 
