@@ -1,43 +1,162 @@
 # Obsidian Brain
 
-A local, agent-native semantic memory layer over an [Obsidian](https://obsidian.md) markdown vault. Obsidian Brain turns a directory of `.md` notes into a queryable FAISS index, exposes it to AI agents as a set of [MCP](https://modelcontextprotocol.io) tools, and runs a baked-in nightly maintenance pipeline that rebuilds the index, organizes notes into Maps-of-Content (MOCs), cross-links related notes, and maintains an action-items ledger — all using **local** LLM endpoints, with no data leaving the LAN.
+**Your Obsidian vault, queryable by your AI agents — fully local, nothing leaves
+your machine.**
 
-> **Human-facing surfaces & truth maintenance (2026-07):** besides the MCP tools the brain now serves a **web UI** at `GET /ui` (search / open-tasks / status / append-insight, bearer-gated), a **`POST /refresh`** endpoint for on-demand incremental reindex, and ships an **Obsidian plugin** (`plugin/`, install via BRAT) with a live active-note related-notes panel and an "ask the brain" command. Retrieval is now **provenance-aware**: notes marked `review_status: superseded/contested` or `unreviewed` transcript/OCR are down-weighted and annotated (`⚠️ SUPERSEDED → …`) so an agent sees a claim is disputed instead of compounding it. `truth_maintenance.py` (nightly, off by default via `BRAIN_TRUTH_ENABLED`) backfills provenance and triages contradictions into a human `truth-review-queue.md`.
+Obsidian Brain turns a directory of `.md` notes into a semantic memory layer for
+AI agents. It indexes your vault into a local [FAISS](https://faiss.ai) vector
+index, exposes it to agents as a set of [MCP](https://modelcontextprotocol.io)
+tools, and runs a nightly maintenance pipeline that keeps your index fresh,
+organizes notes into Maps-of-Content (MOCs), cross-links related notes, and
+maintains an action-items ledger — all over **local** LLM endpoints (LM Studio,
+llama-swap, or any OpenAI-compatible server). No API keys, no cloud calls.
+
+Highlights:
+
+- **Zero-data-leak by construction** — embeddings and reasoning run against LAN
+  endpoints; no third party ever sees your notes.
+- **Agent-native** — a single MCP server with two transports (`stdio` for local
+  agents, `streamable-HTTP` for remote ones) and identical tool behavior.
+- **Two retrieval modes** — semantic search for *relevance*, plus an
+  index-free deterministic layer for *exhaustive* checkbox-task queries.
+- **Write-back** — agents create entity notes and append dated insights into
+  your vault as plain Markdown.
+- **Self-maintaining** — nightly index rebuild, MOC classification, Related
+  Notes cross-linking, and an action-items ledger, with no external cron.
+- **Bonus surfaces** — a bearer-gated web UI, an optional Obsidian plugin, and
+  provenance-aware retrieval that flags superseded or contested notes.
 
 ---
 
 ## Table of Contents
 
-- [Project Overview & Philosophy](#project-overview--philosophy)
-- [Architecture](#architecture)
+- [Quick Start](#quick-start)
 - [Features](#features)
-- [Module / Component Breakdown](#module--component-breakdown)
-- [Installation & Prerequisites](#installation--prerequisites)
+- [Architecture](#architecture)
+- [CLI Entry Points](#cli-entry-points)
+- [MCP Tools](#mcp-tools)
 - [Configuration](#configuration)
-- [Usage](#usage)
-  - [CLI Entry Points](#cli-entry-points)
-  - [MCP Tools](#mcp-tools)
-- [Running the MCP Server](#running-the-mcp-server)
 - [Deployment (Docker / Compose)](#deployment-docker--compose)
 - [Nightly Maintenance Pipeline](#nightly-maintenance-pipeline)
 - [Key Design Decisions](#key-design-decisions)
 - [Troubleshooting](#troubleshooting)
+- [Development & Testing](#development--testing)
+- [License](#license)
 
 ---
 
-## Project Overview & Philosophy
+## Quick Start
 
-**Vault-as-substrate.** The Obsidian vault is the single source of truth. Obsidian Brain never replaces or migrates your notes into a separate database — it reads the markdown you already write and writes its own artifacts (the FAISS index, entity notes, MOC link blocks, the action-items ledger) *back into* (or alongside) the vault as plain markdown. The semantic index lives in a `_brain/` subdirectory of the vault; everything the system "knows" is reconstructible from the notes themselves.
+### Prerequisites
 
-**Agent-native.** The primary interface is not a UI but a set of MCP tools designed to be called by an AI agent (Claude Code, Copilot, or any MCP client). The tools cover both *fuzzy recall* (semantic search over note content) and *exhaustive precision* (deterministic checkbox-task listing and completion), plus *write-back* (creating entity notes, recording insights). The agent decides when to reach for the brain based on the conversation.
+- **Python 3.11+**
+- A running **LM Studio** (or any OpenAI-compatible) **embeddings** server —
+  default `http://localhost:1234/v1`, serving
+  `text-embedding-nomic-embed-text-v2-moe`. Embedding and querying both require
+  this endpoint to be up.
+- For the nightly maintenance scripts only: a local OpenAI-compatible **chat**
+  endpoint (the defaults assume llama-swap at `http://localhost:4004/v1`,
+  model `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`).
 
-**Local embeddings, local reasoning.** All embeddings are generated by a LAN-local [LM Studio](https://lmstudio.ai) (OpenAI-compatible) endpoint, and the nightly classification/ledger reasoning runs against a LAN-local chat endpoint (llama-swap by default). No API keys, no cloud calls, no third-party data exposure. The default embedding model is `text-embedding-nomic-embed-text-v2-moe`.
+### Install and build your first index
+
+```bash
+git clone <this-repo>
+cd obsidian-brain
+pip install -r requirements.txt
+
+# Build the initial index (requires the embeddings endpoint to be up):
+OBSIDIAN_VAULT_PATH=/path/to/your/vault python3 indexer.py --force
+```
+
+The index lives in a `_brain/` subdirectory **inside your vault** — it's a
+regenerable cache; your notes are never modified by indexing.
+
+### Query from the CLI
+
+```bash
+python3 searcher.py "what did I decide about the Alpha project"
+```
+
+### Connect an agent
+
+`mcp_server.py` is the single entrypoint; both transports expose identical
+tools.
+
+**Local agents (stdio)** — e.g. in Claude Code's `~/.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "obsidian-brain": {
+      "command": "python3",
+      "args": ["/path/to/obsidian-brain/mcp_server.py"],
+      "env": { "OBSIDIAN_VAULT_PATH": "/path/to/your/vault" }
+    }
+  }
+}
+```
+
+**Remote agents (streamable-HTTP)** — e.g. in an MCP client config:
+
+```jsonc
+{ "mcpServers": { "obsidian-brain": { "url": "http://<host>:8053/mcp" } } }
+```
+
+For cross-machine access without exposing the port, use an SSH port-forward:
+
+```bash
+ssh user@server -L 8053:localhost:8053   # then point the client at localhost:8053/mcp
+```
+
+> **Authentication:** set `BRAIN_AUTH_TOKEN` to require
+> `Authorization: Bearer <token>` on every HTTP request (except `GET /health`).
+> If it is unset the HTTP tools are **unauthenticated** — anyone who can reach
+> `host:8053` can read and write the vault — so restrict the port to a trusted
+> network. The server logs a loud warning at startup when no token is
+> configured.
+
+---
+
+## Features
+
+- **Semantic search** over the whole vault (`brain_query`), returning
+  note-deduplicated context blocks the agent can quote.
+- **Deterministic task management** — exhaustive scan of every Obsidian
+  checkbox across all notes (`brain_tasks`) and surgical in-place completion
+  (`brain_complete_task`), independent of the semantic index.
+- **Agent write-back** — create entity notes (`brain_write_entity`) and append
+  dated insight sections to existing notes (`brain_append_insight`).
+- **Two MCP transports** from a single entrypoint — `stdio` for local agents,
+  `streamable-HTTP` for remote/containerized agents, identical tools.
+- **Incremental, concurrency-safe index builds** — mtime + signature-based
+  skip of unchanged vaults, atomic `os.replace` index swaps, in-process
+  `RLock` so live queries never see a partial index.
+- **Baked-in nightly maintenance** (HTTP mode) — automatic index rebuild plus
+  MOC classification, "Related Notes" cross-linking, and action-items ledger
+  updates, with no external cron.
+- **Reversible vault edits** — every file the maintenance scripts touch is
+  backed up first to a directory **outside** the vault.
+- **Web UI** — a bearer-gated interface at `GET /ui` (search, open tasks,
+  status, append-insight) plus a `POST /refresh` endpoint for on-demand
+  incremental reindex.
+- **Obsidian plugin** — `plugin/` (install via BRAT) adds a Related Notes panel
+  for the active note and an "ask the brain" command.
+- **Provenance-aware retrieval** — notes marked `review_status: superseded` /
+  `contested` (or `unreviewed` transcript/OCR) are down-weighted and annotated
+  (`⚠️ SUPERSEDED → …`) so an agent sees a claim is disputed instead of
+  compounding it. `truth_maintenance.py` (opt-in, nightly) backfills provenance
+  and triages contradictions into a human `truth-review-queue.md`.
+- **Self-contained Docker image** — brain modules baked in, vault bind-mounted
+  at runtime; `/health` liveness route for healthchecks.
 
 ---
 
 ## Architecture
 
-Obsidian Brain is a layered system. The bottom layer is a semantic-search pipeline; the middle layer is an orchestration facade plus a deterministic task layer; the top layer is the MCP server and its baked-in scheduler.
+Obsidian Brain is a layered system. The bottom layer is a semantic-search
+pipeline; the middle layer is an orchestration facade plus a deterministic task
+layer; the top layer is the MCP server and its baked-in scheduler.
 
 ```
                                 ┌──────────────────────────────────────────────┐
@@ -100,149 +219,149 @@ Obsidian Brain is a layered system. The bottom layer is a semantic-search pipeli
 ### Indexing data flow (`indexer.build_index`)
 
 1. `ensure_dirs()` creates `_brain/` and `_brain/entities/`.
-2. `scan_vault()` recursively globs `*.md`, **skips top-level `_brain/` (except `_brain/entities/`, which stays index-visible)** via `safe_paths.is_scannable_md`, strips leading YAML frontmatter (`content.split("---", 2)[2]`), and returns `{path, abs_path, content, mtime}` per note. Per-file read errors are silently skipped.
-3. `chunk_text()` splits each note on sentence boundaries (`(?<=[.!?])\s+`) into ~`CHUNK_SIZE` (500) "token" chunks with ~`CHUNK_OVERLAP` (50) token overlap. Token counts are a **heuristic** (`words × 1.3`), not a real tokenizer.
-4. All chunk texts are flattened and embedded in **one batched call** to `embed_texts()`.
-5. A `faiss.IndexFlatL2(dim)` is built (`dim` inferred from the first embedding) and the vectors are added.
-6. Under `INDEX_LOCK`, the index and a `metadata.json` sidecar are written to `.tmp` files, then `os.replace`-swapped atomically.
+2. `scan_vault()` recursively globs `*.md`, **skips top-level `_brain/`
+   (except `_brain/entities/`, which stays index-visible)** via
+   `safe_paths.is_scannable_md`, strips leading YAML frontmatter, and returns
+   `{path, abs_path, content, mtime}` per note. Per-file read errors are
+   silently skipped.
+3. `chunk_text()` splits each note on sentence boundaries (`(?<=[.!?])\s+`)
+   into ~`CHUNK_SIZE` (500) "token" chunks with ~`CHUNK_OVERLAP` (50) token
+   overlap. Token counts are a **heuristic** (`words × 1.3`), not a real
+   tokenizer.
+4. All chunk texts are flattened and embedded in **one batched call** to
+   `embed_texts()`.
+5. A `faiss.IndexFlatL2(dim)` is built (`dim` inferred from the first
+   embedding) and the vectors are added.
+6. Under `INDEX_LOCK`, the index and a `metadata.json` sidecar are written to
+   `.tmp` files, then `os.replace`-swapped atomically.
 
-The implicit contract: **FAISS row `i` corresponds positionally to `metadata["chunks"][i]`.**
+The implicit contract: **FAISS row `i` corresponds positionally to
+`metadata["chunks"][i]`.**
 
 ### Query data flow (`searcher.search`)
 
-1. Under `INDEX_LOCK`, read `index.faiss` and `metadata.json` together (return `[]` if either is missing or there are no chunks).
-2. Embed the query, run `index.search` for `k = min(top_k*2, ntotal)` neighbors.
+1. Under `INDEX_LOCK`, read `index.faiss` and `metadata.json` together (return
+   `[]` if either is missing or there are no chunks).
+2. Embed the query, run `index.search` for `k = min(top_k*2, ntotal)`
+   neighbors.
 3. Convert each L2 distance to a score `1 / (1 + dist)`, skip `idx == -1`.
-4. Deduplicate by `note_path`, preserving FAISS order, until `top_k` distinct notes are collected.
-5. `format_results()` renders a markdown context block (each chunk fenced and truncated to 500 chars).
+4. Deduplicate by `note_path`, preserving FAISS order, until `top_k` distinct
+   notes are collected.
+5. `format_results()` renders a markdown context block (each chunk fenced and
+   truncated to 500 chars).
 
-> **Note on scoring:** scores are `1/(1+L2_distance)` over **un-normalized** `IndexFlatL2` vectors — they are *not* cosine similarity and are *not* comparable across queries or models. Results are returned in FAISS L2 order with note-level dedup only (there is no cosine re-rank step).
+> **Note on scoring:** scores are `1/(1+L2_distance)` over **un-normalized**
+> `IndexFlatL2` vectors — they are *not* cosine similarity and are *not*
+> comparable across queries or models. Results are returned in FAISS L2 order
+> with note-level dedup only (there is no cosine re-rank step).
 >
-> **Consistency guard:** before returning hits, `search` checks `index.ntotal == len(chunks)`. If the index and metadata are out of sync (e.g. an interrupted build) or either file is unreadable/corrupt, it returns `[]` and logs that a rebuild is needed — it never returns mismatched text or raises.
+> **Consistency guard:** before returning hits, `search` checks
+> `index.ntotal == len(chunks)`. If the index and metadata are out of sync
+> (e.g. an interrupted build) or either file is unreadable/corrupt, it returns
+> `[]` and logs that a rebuild is needed — it never returns mismatched text or
+> raises.
 
 ---
 
-## Features
-
-- **Semantic search** over the whole vault, returning note-deduplicated context blocks (`brain_query`).
-- **Deterministic task management** — exhaustive scan of every Obsidian checkbox across all notes (`brain_tasks`) and surgical in-place completion (`brain_complete_task`), independent of the semantic index.
-- **Agent write-back** — create entity notes (`brain_write_entity`) and append dated insight sections to existing notes (`brain_append_insight`).
-- **Two MCP transports** from a single entrypoint — `stdio` for local agents, `streamable-HTTP` for remote/containerized agents, with identical tool names and behavior.
-- **Incremental, concurrency-safe index builds** — `mtime`-based skip of unchanged vaults, atomic `os.replace` index swaps, in-process `RLock` so live queries never see a partial index.
-- **Baked-in nightly maintenance** (HTTP mode) — automatic index rebuild plus MOC classification, semantic "Related Notes" cross-linking, and action-items ledger updates, with no external cron.
-- **Reversible vault edits** — every file the maintenance scripts touch is backed up first to a directory **outside** the vault (so Obsidian's graph view stays clean).
-- **Self-contained Docker image** — brain modules baked in, vault bind-mounted at runtime; `/health` liveness route for healthchecks.
-
----
-
-## Module / Component Breakdown
-
-### Core indexing pipeline
-
-| File | Responsibility |
-|------|----------------|
-| `config.py` | Central paths + model settings. `OBSIDIAN_VAULT_PATH`, `LM_BASE_URL`, and `EMBEDDING_MODEL` are env-driven (the deploy compose sets them); embedding instruction prefixes default per model family (`_default_prefixes`: nomic `search_document:`/`search_query:`, Qwen3-Embedding raw docs + `Instruct:`/`Query:` template) with `EMBED_DOC_PREFIX`/`EMBED_QUERY_PREFIX` env overrides. `CHUNK_SIZE`/`CHUNK_OVERLAP`/`TOP_K` remain code constants. |
-| `embedder.py` | Lazily-memoized `OpenAI` client pointed at `LM_BASE_URL` (`api_key="not-required"`, explicit `EMBED_TIMEOUT`). `embed_texts(list)` embeds in `EMBED_BATCH_SIZE` batches with per-batch backoff retry (`EMBED_MAX_RETRIES`); `embed_query(str)` is a single-string wrapper. |
-| `indexer.py` | `scan_vault`, `chunk_text`, `build_index(force=False)`, `ensure_dirs`. Owns `INDEX_LOCK` (a `threading.RLock`) and the atomic index/metadata swap. CLI: `python3 indexer.py [--force]`. |
-| `searcher.py` | `search(query, top_k)` (kNN + note-dedup) and `format_results`. Imports `INDEX_LOCK` from `indexer` to share the in-process lock. CLI: `python3 searcher.py <query…>`. |
-
-### Orchestration & tasks
-
-| File | Responsibility |
-|------|----------------|
-| `brain.py` | Facade behind the MCP tools: `query_brain` (→ `brain_query`), `write_entity_note` (→ `brain_write_entity`), `append_insight` (→ `brain_append_insight`), `consolidate` (→ `brain_build_index`). Entity slug collapses every non-alphanumeric run to a single `-`. **Existing entity files are never overwritten** (`write_entity_note` returns `status:"exists"`). `append_insight`/`write_entity_note` return structured dicts (`status` `ok`/`error`/`created`/`exists`), confine writes to the vault via `safe_paths.resolve_in_vault`, preserve line endings, and write atomically. |
-| `tasks.py` | Index-free, deterministic checkbox layer. Walks every `*.md` except those under `_brain/`, matches `- [ ]` / `- [x]` (also `*`/`+` bullets, `x`/`X`). `scan_tasks(status)`, `count_tasks()`, `complete_task(note_path, match, …)`, `format_tasks()`. `complete_task` requires the `match` substring to identify **exactly one** open task (else `error`/`ambiguous`, writing nothing) and stamps completion with Obsidian Tasks' `✅ YYYY-MM-DD`. |
-| `consolidate.py` | Nightly cron entrypoint (`python consolidate.py [--force]`). **Hard-requires `OBSIDIAN_VAULT_PATH` in the environment** (exits 1 otherwise). Calls `brain.consolidate(force=…)`: plain `consolidate.py` takes the incremental path (rebuilds only if the vault or index params changed); `--force` re-embeds everything. |
-
-### MCP server
-
-| File | Responsibility |
-|------|----------------|
-| `mcp_server.py` | Single entrypoint. Registers seven `@mcp.tool` functions and a `GET /health` route, resolves the transport, and (in HTTP mode only) starts the nightly scheduler daemon thread. `FastMCP` is constructed at import time with `stateless_http` on by default. |
-
-### Nightly maintenance scripts (stdlib-only, run as subprocesses)
-
-| File | Responsibility |
-|------|----------------|
-| `moc_linker.py` | Classifies every note into a MOC (from `MOCs/`, excluding `Home MOC`) via a local **chat** model, writes idempotent managed link blocks into `MOCs/*.md`, optionally stamps `moc:` frontmatter (`--tag-notes`), and optionally writes a semantic `## Related Notes` block per note (`--related`, uses the **embeddings** endpoint). Pure stdlib (no `openai`/`yaml`/`numpy`). Dry-run is the default. |
-| `ledger_update.py` | Maintains `open-action-items-ledger.md` at the vault root: flips open checkboxes to done when a recently-edited note shows explicit completion evidence, and appends newly-surfaced items into a managed `<!-- ledger-auto -->` block. Imports `moc_linker` for its HTTP client, scanner, backup root, and Related-block markers. Dry-run is the default. |
-
----
-
-## Installation & Prerequisites
-
-### Prerequisites
-
-- **Python 3.11+**
-- A running **LM Studio** (or any OpenAI-compatible) **embeddings** server reachable on the LAN — default `http://localhost:1234/v1`, serving `text-embedding-nomic-embed-text-v2-moe`. Embedding and querying both require this endpoint to be up.
-- For the nightly maintenance scripts only: a local OpenAI-compatible **chat** endpoint (default llama-swap at `http://localhost:4004/v1`, model `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`).
-- For `faiss-cpu` at the OS level: `libgomp1` (installed automatically in the Docker image; install via your package manager for bare-metal use).
-
-### Python dependencies (`requirements.txt`)
-
-```
-faiss-cpu
-numpy
-openai
-mcp>=1.26.0   # MCP SDK floor — provides FastMCP + stdio/streamable-HTTP transports
-uvicorn       # ASGI server underlying FastMCP streamable-HTTP
-requests
-```
-
-> The maintenance scripts (`moc_linker.py`, `ledger_update.py`) use **only the Python standard library** — they run even without the pip dependencies installed.
-
-### Install
+## CLI Entry Points
 
 ```bash
-cd /path/to/obsidian-brain
-pip install -r requirements.txt
+# Build / rebuild the FAISS index.
+# Without --force, build_index uses an mtime fast-path: it returns
+# "already_current" if no note is newer than the stored index_mtime.
+python3 indexer.py            # incremental (rebuild only if a note changed)
+python3 indexer.py --force    # unconditional full re-embed
 
-# Build the initial index (requires the embeddings endpoint to be up):
-OBSIDIAN_VAULT_PATH=/path/to/vault python3 indexer.py --force
+# Ad-hoc semantic search (prints the formatted context block).
+python3 searcher.py "what did I decide about the Alpha project"
+python3 searcher.py           # defaults to the query "project decisions"
+
+# Nightly consolidation (requires OBSIDIAN_VAULT_PATH in env; exits 1 if unset).
+# NOTE: always force-rebuilds regardless of the --force flag.
+OBSIDIAN_VAULT_PATH=/path/to/your/vault python3 consolidate.py
+
+# MOC linker — DRY-RUN is the default (writes nothing without --apply).
+python3 moc_linker.py --dry-run
+python3 moc_linker.py --apply
+python3 moc_linker.py --apply --tag-notes
+python3 moc_linker.py --apply --tag-notes --related
+python3 moc_linker.py --apply --endpoint http://localhost:1234/v1 --model gpt-oss-20b
+
+# Action-items ledger — DRY-RUN unless --apply is passed.
+python3 ledger_update.py --dry-run
+python3 ledger_update.py --apply
+python3 ledger_update.py --apply --recent-days 2
 ```
 
-### Testing
+**`moc_linker.py` flags:** `--vault` (default `$OBSIDIAN_VAULT_PATH`, required
+if unset), `--endpoint` (chat URL, default `http://localhost:4004/v1`),
+`--model` (default `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`), `--timeout` (180s),
+`--retries` (3), `--exclude-dailies` (skip `Daily Notes/`, which is included by
+default), `--tag-notes`, `--related`, `--embed-endpoint` (default
+`http://localhost:1234/v1`), `--embed-model` (default
+`text-embedding-nomic-embed-text-v2-moe`), `--top-related` (5), and the
+mutually-exclusive `--dry-run` (default) / `--apply`. Exit codes: `0` success,
+`2` if the vault is missing or no target MOCs are discovered. Classification
+runs unless **only** `--related` was given; `--tag-notes` forces classification
+even alongside `--related`.
 
-A `pytest` suite under `tests/` covers the path-containment guard, HTTP auth
-middleware, embedding batching/retry, index durability (delete-aware rebuild,
-consistency guard, corrupt-metadata resilience), write-path contracts, and the
-ledger logic (JSON extraction, evidence validation, auto-block completion). It
-uses a temp vault and a deterministic in-process fake embedder, so **no network
-or real vault is required**.
+**`ledger_update.py` flags:** `--vault`, `--endpoint`, `--model` (same defaults
+as `moc_linker`), `--recent-days` (3), `--timeout` (240s), `--retries` (3), and
+the mutually-exclusive `--dry-run` / `--apply`. Exit codes: `0` (success /
+nothing to do / dry-run), `2` if the ledger file is missing.
 
-```bash
-pip install pytest
-python -m pytest tests/ -q
-```
+> **Gotcha:** for both maintenance scripts, the mode group has **no default and
+> is not required** — running with *neither* flag behaves as a dry-run (it
+> reads notes and calls the model but writes nothing). Cron jobs must
+> explicitly pass `--apply`.
+
+---
+
+## MCP Tools
+
+| Tool | Signature | When to use |
+|------|-----------|-------------|
+| `brain_query` | `brain_query(query: str, top_k: int = 5) -> str` | Semantic recall. Call before answering about people, projects, clients, decisions, or past conversations. Returns a formatted context block of the most relevant note excerpts; `top_k` caps distinct notes. |
+| `brain_write_entity` | `brain_write_entity(name: str, initial_content: str = "") -> str` | Create a new entity note under `_brain/entities/<slug>.md`. Returns a JSON result with `status` `"created"` or `"exists"` (plus `slug`/`path`). **Does not modify an existing entity** — use `brain_append_insight`. Path must resolve inside the vault. |
+| `brain_append_insight` | `brain_append_insight(note_path: str, insight: str, context: str = "") -> str` | Append a dated `## Brain Insight` section to an existing note (path absolute or vault-relative, must resolve inside the vault and be `.md`). Returns a JSON result with `status` `"ok"`/`"error"`. Preserves the note's line endings and writes atomically. |
+| `brain_tasks` | `brain_tasks(status: str = "open", query: str = "") -> str` | Exhaustive, deterministic checkbox listing across the whole vault. Use for "what are my open tasks" — not `brain_query`. `status` ∈ `open`/`done`/`all`; optional `query` substring-filters task text or note path. Results grouped by note. |
+| `brain_complete_task` | `brain_complete_task(note_path: str, match: str) -> str` | Flip exactly one matching open task to done (`- [x] … ✅ <date>`). Writes nothing if `match` is ambiguous or matches none. Returns a JSON result. |
+| `brain_build_index` | `brain_build_index(force: bool = False) -> str` | Rebuild the FAISS index if notes changed externally and retrieval seems stale. Returns a JSON summary. |
+| `brain_status` | `brain_status() -> str` | Report vault path, embedding model, `LM_BASE_URL`, indexed note/chunk counts, FAISS vector count, entity count, and task counts. Returns JSON. |
 
 ---
 
 ## Configuration
 
-There is one environment variable that governs the **core** pipeline (`OBSIDIAN_VAULT_PATH`); the remaining knobs are split between the MCP server's runtime/scheduler behavior and the maintenance subprocesses.
+There is one environment variable that governs the **core** pipeline
+(`OBSIDIAN_VAULT_PATH`); the remaining knobs are split between the MCP server's
+runtime/scheduler behavior and the maintenance subprocesses.
 
-> ### Note: `LM_BASE_URL` and `EMBEDDING_MODEL` are env overrides, not just `config.py` defaults
-> `LM_BASE_URL` and `EMBEDDING_MODEL` are env-driven for the **core** path too (closing the old M-10/H7 drift): set them in the compose and both `brain_query`/`brain_build_index` *and* the maintenance subprocesses use them. Changing `EMBEDDING_MODEL` (or a prefix) automatically triggers a full reindex on the next build via the stored `index_params`.
+> **Note:** `LM_BASE_URL` and `EMBEDDING_MODEL` are env overrides for the
+> **core** path too: set them (e.g. in a Docker compose) and both
+> `brain_query`/`brain_build_index` *and* the maintenance subprocesses use
+> them. Changing `EMBEDDING_MODEL` (or a prefix) automatically triggers a full
+> reindex on the next build via the stored `index_params`.
 
-### Core pipeline (`config.py`)
+### Core pipeline (via `config.py`)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `OBSIDIAN_VAULT_PATH` | *(required — no default)* | Vault root. All derived paths (`_brain/`, `index.faiss`, `metadata.json`, `entities/`) are computed from it. The primary env var for the core path. Hard-required (exit 1) by `consolidate.py`. |
-| *`LM_BASE_URL`* | `http://localhost:1234/v1` | **Env override, falls back to the `config.py` default.** OpenAI-compatible embeddings base URL. |
-| *`EMBEDDING_MODEL`* | `text-embedding-nomic-embed-text-v2-moe` | **Env override, falls back to the `config.py` default.** Embedding model id. |
-| *`CHUNK_SIZE`* | `500` | **Hardcoded constant.** Approx tokens per chunk. |
-| *`CHUNK_OVERLAP`* | `50` | **Hardcoded constant.** Approx token overlap between chunks. |
-| *`TOP_K`* | `5` | **Hardcoded constant.** Default distinct notes returned by `search`. |
+| `LM_BASE_URL` | `http://localhost:1234/v1` | OpenAI-compatible embeddings base URL. Env override; falls back to the `config.py` default. |
+| `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v2-moe` | Embedding model id. Env override; falls back to the `config.py` default. |
+| `CHUNK_SIZE` | `500` | **Hardcoded constant.** Approx tokens per chunk. |
+| `CHUNK_OVERLAP` | `50` | **Hardcoded constant.** Approx token overlap between chunks. |
+| `TOP_K` | `5` | **Hardcoded constant.** Default distinct notes returned by `search`. |
 | `EMBED_BATCH_SIZE` | `64` | Texts per embedding request. Chunks are embedded in batches so a large vault never sends one oversized request. |
 | `EMBED_TIMEOUT` | `30` | Per-request embedding timeout (seconds). Replaces the SDK's 600s default so a stalled endpoint fails fast. |
 | `EMBED_MAX_RETRIES` | `3` | Per-batch attempts with exponential backoff (1s/2s/4s, capped 8s) before the build aborts. |
 
-### MCP server transport (`mcp_server.py`)
+### MCP server transport (via `mcp_server.py`)
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `MCP_TRANSPORT` | `stdio` | `stdio` \| `streamable-http`. Used only if neither `--http` nor `--stdio` is passed. (Docker image overrides to `streamable-http`.) |
+| `MCP_TRANSPORT` | `stdio` | `stdio` \| `streamable-http`. Used only if neither `--http` nor `--stdio` is passed. (The Docker image overrides to `streamable-http`.) |
 | `MCP_HOST` | `0.0.0.0` | Bind host for streamable-HTTP. |
 | `MCP_PORT` | `8000` | Bind port for streamable-HTTP. |
 | `MCP_PATH` | `/mcp` | URL path for the streamable-HTTP endpoint. |
@@ -267,16 +386,16 @@ There is one environment variable that governs the **core** pipeline (`OBSIDIAN_
 |----------|---------|---------|
 | `BRAIN_LINKER_ENABLED` | `1` | If truthy, run `moc_linker.py --apply --tag-notes --related` after each refresh. |
 | `BRAIN_LEDGER_ENABLED` | `1` | If truthy, run `ledger_update.py --apply` after each refresh. |
-| `LINKER_CHAT_URL` | value of `LM_BASE_URL` env (fallback `http://localhost:1234/v1`) | OpenAI-compatible **chat** endpoint for MOC classification + ledger reasoning. A llama-swap deployment commonly points this at `http://localhost:4004/v1`. |
-| `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | Chat model id passed as `--model`. Example deployment override: `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`. |
-| `LEDGER_CHAT_URL` | value of `LINKER_CHAT_URL` | Chat endpoint for the **ledger** update, split from the linker (commit `466d3b1`) so the harder ledger task can use a different/stronger endpoint. Falls back to the linker's. |
+| `LINKER_CHAT_URL` | value of `LM_BASE_URL` env (fallback `http://localhost:1234/v1`) | OpenAI-compatible **chat** endpoint for MOC classification + ledger reasoning. A llama-swap setup commonly points this at `http://localhost:4004/v1`. |
+| `LINKER_CHAT_MODEL` | `qwen3.6-35b-a3b-mtp` | Chat model id passed as `--model`. Example override: `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`. |
+| `LEDGER_CHAT_URL` | value of `LINKER_CHAT_URL` | Chat endpoint for the **ledger** update — split from the linker so the harder ledger task can use a different/stronger endpoint. Falls back to the linker's. |
 | `LEDGER_CHAT_MODEL` | value of `LINKER_CHAT_MODEL` | Chat model for the ledger update. Example deployment: a stronger model than the linker's. |
 | `BRAIN_TRUTH_ENABLED` | `0` | If truthy, run `truth_maintenance.py --apply --backfill` (contradiction triage + provenance) **before** the linker. Off by default — run `truth_maintenance.py --dry-run` by hand and gauge precision first. |
 | `TRUTH_CHAT_URL` | value of `LEDGER_CHAT_URL` | Chat endpoint for the NLI/contradiction step (the hardest task — defaults to the ledger's stronger model). |
 | `TRUTH_CHAT_MODEL` | value of `LEDGER_CHAT_MODEL` | Chat model for truth maintenance. |
-| `LM_BASE_URL` | `http://localhost:1234/v1` *(in this function)* | **Re-read from env here** (different default than `config.py`!) to pass `--embed-endpoint`. |
-| `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v2-moe` *(in this function)* | Re-read from env to pass `--embed-model`. |
-| `OBSIDIAN_VAULT_PATH` | `/vault` *(in this function)* | Re-read from env (different default than `config.py`) to pass `--vault`. |
+| `LM_BASE_URL` | `http://localhost:1234/v1` | Re-read from env here and passed to the linker as `--embed-endpoint`. |
+| `EMBEDDING_MODEL` | `text-embedding-nomic-embed-text-v2-moe` | Re-read from env and passed to the linker as `--embed-model`. |
+| `OBSIDIAN_VAULT_PATH` | `/vault` | Re-read from env and passed to the maintenance scripts as `--vault` (the Docker image sets `/vault`). |
 | `MOC_BACKUP_DIR` | unset → `<vault.parent>/.<vault.name>-moc-backups` | The **only** env var read by `moc_linker.py` / `ledger_update.py` directly. Root for pre-edit backups (`mocs/`, `notes/`, `related/`, `ledger/` subdirs), outside the vault. Set to a mounted host path for durable backups. |
 
 ### Container / runtime
@@ -289,133 +408,51 @@ There is one environment variable that governs the **core** pipeline (`OBSIDIAN_
 
 ---
 
-## Usage
-
-### CLI Entry Points
-
-```bash
-# Build / rebuild the FAISS index.
-# Without --force, build_index uses an mtime fast-path: it returns
-# "already_current" if no note is newer than the stored index_mtime.
-python3 indexer.py            # incremental (rebuild only if a note changed)
-python3 indexer.py --force    # unconditional full re-embed
-
-# Ad-hoc semantic search (prints the formatted context block).
-python3 searcher.py "what did I decide about the Alpha project"
-python3 searcher.py           # defaults to the query "project decisions"
-
-# Nightly consolidation (requires OBSIDIAN_VAULT_PATH in env; exits 1 if unset).
-# NOTE: always force-rebuilds regardless of the --force flag.
-OBSIDIAN_VAULT_PATH=/path/to/vault python3 consolidate.py
-
-# MOC linker — DRY-RUN is the default (writes nothing without --apply).
-python3 moc_linker.py --dry-run
-python3 moc_linker.py --apply
-python3 moc_linker.py --apply --tag-notes
-python3 moc_linker.py --apply --tag-notes --related
-python3 moc_linker.py --apply --endpoint http://localhost:1234/v1 --model gpt-oss-20b
-
-# Action-items ledger — DRY-RUN unless --apply is passed.
-python3 ledger_update.py --dry-run
-python3 ledger_update.py --apply
-python3 ledger_update.py --apply --recent-days 2
-```
-
-**`moc_linker.py` flags:** `--vault` (default `$OBSIDIAN_VAULT_PATH`, required if unset), `--endpoint` (chat URL, default `http://localhost:4004/v1`), `--model` (default `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`), `--timeout` (180s), `--retries` (3), `--exclude-dailies` (skip `Daily Notes/`, which is included by default), `--tag-notes`, `--related`, `--embed-endpoint` (default `http://localhost:1234/v1`), `--embed-model` (default `text-embedding-nomic-embed-text-v2-moe`), `--top-related` (5), and the mutually-exclusive `--dry-run` (default) / `--apply`. Exit codes: `0` success, `2` if the vault is missing or no target MOCs are discovered. Classification runs unless **only** `--related` was given; `--tag-notes` forces classification even alongside `--related`.
-
-**`ledger_update.py` flags:** `--vault`, `--endpoint`, `--model` (same defaults as `moc_linker`), `--recent-days` (3), `--timeout` (240s), `--retries` (3), and the mutually-exclusive `--dry-run` / `--apply`. Exit codes: `0` (success / nothing to do / dry-run), `2` if the ledger file is missing.
-
-> ⚠️ **Cron gotcha:** for both maintenance scripts, the mode group has **no default and is not required** — running with *neither* flag behaves as a dry-run (it reads notes and calls the model but writes nothing). Cron jobs must explicitly pass `--apply`.
-
-### MCP Tools
-
-| Tool | Signature | When to use |
-|------|-----------|-------------|
-| `brain_query` | `brain_query(query: str, top_k: int = 5) -> str` | Semantic recall. Call before answering about people, projects, clients, decisions, or past conversations. Returns a formatted context block of the most relevant note excerpts; `top_k` caps distinct notes. |
-| `brain_write_entity` | `brain_write_entity(name: str, initial_content: str = "") -> str` | Create a new entity note under `_brain/entities/<slug>.md`. Returns a JSON result with `status` `"created"` or `"exists"` (plus `slug`/`path`). **Does not modify an existing entity** — use `brain_append_insight`. Path must resolve inside the vault. |
-| `brain_append_insight` | `brain_append_insight(note_path: str, insight: str, context: str = "") -> str` | Append a dated `## Brain Insight` section to an existing note (path absolute or vault-relative, must resolve inside the vault and be `.md`). Returns a JSON result with `status` `"ok"`/`"error"`. Preserves the note's line endings and writes atomically. |
-| `brain_tasks` | `brain_tasks(status: str = "open", query: str = "") -> str` | Exhaustive, deterministic checkbox listing across the whole vault. Use for "what are my open tasks" — not `brain_query`. `status` ∈ `open`/`done`/`all`; optional `query` substring-filters task text or note path. Results grouped by note. |
-| `brain_complete_task` | `brain_complete_task(note_path: str, match: str) -> str` | Flip exactly one matching open task to done (`- [x] … ✅ <date>`). Writes nothing if `match` is ambiguous or matches none. Returns a JSON result. |
-| `brain_build_index` | `brain_build_index(force: bool = False) -> str` | Rebuild the FAISS index if notes changed externally and retrieval seems stale. Returns a JSON summary. |
-| `brain_status` | `brain_status() -> str` | Report vault path, embedding model, `LM_BASE_URL`, indexed note/chunk counts, FAISS vector count, entity count, and task counts. Returns JSON. |
-
----
-
-## Running the MCP Server
-
-`mcp_server.py` is the single entrypoint and supports two interchangeable transports with identical tool behavior. CLI flags (`--http` / `--stdio`) take precedence over `MCP_TRANSPORT`.
-
-```bash
-# stdio (default) — for local agents (Claude Code / Copilot)
-python mcp_server.py
-python mcp_server.py --stdio
-
-# streamable-HTTP — for remote / containerized agents (default 0.0.0.0:8000/mcp)
-python mcp_server.py --http
-MCP_TRANSPORT=streamable-http python mcp_server.py
-```
-
-> The nightly scheduler daemon thread and the `GET /health` route are only active in **streamable-HTTP** mode.
-
-### Register with an MCP client
-
-**Local (stdio)** — e.g. in `~/.claude/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "obsidian-brain": {
-      "command": "python3",
-      "args": ["/path/to/obsidian-brain/mcp_server.py"],
-      "env": { "OBSIDIAN_VAULT_PATH": "/path/to/vault" }
-    }
-  }
-}
-```
-
-**Remote (streamable-HTTP):**
-
-```jsonc
-{ "mcpServers": { "obsidian-brain": { "url": "http://<host>:8053/mcp" } } }
-```
-
-For cross-machine access without exposing the port, use an SSH port-forward:
-
-```bash
-ssh user@server -L 8053:localhost:8053   # then point the client at localhost:8053/mcp
-```
-
-> 🔒 **Authentication:** set `BRAIN_AUTH_TOKEN` to require `Authorization: Bearer <token>` on every HTTP request (except `GET /health`). If it is unset the HTTP tools are **unauthenticated** — anyone who can reach `host:8053` can read and write the vault — so restrict the port to a trusted network (Docker `backend` network and/or SSH port-forward). The server logs a loud warning at startup when no token is configured.
-
----
-
 ## Deployment (Docker / Compose)
 
-The brain ships as a self-contained `python:3.11-slim` image: brain modules and `mcp_server.py` are baked in; the vault is **bind-mounted** at runtime, so the image is reusable across vaults.
+The brain ships as a self-contained `python:3.11-slim` image: brain modules and
+`mcp_server.py` are baked in; the vault is **bind-mounted** at runtime, so the
+image is reusable across vaults.
 
 ### Image facts (`Dockerfile`)
 
-- Installs `libgomp1` (faiss-cpu runtime), `curl` (healthcheck), `tzdata` (TZ-aware schedule).
-- Dependencies are installed before `COPY *.py ./` so code-only changes only re-run the cheap COPY layer. (`COPY *.py ./` bakes **all** top-level `.py` modules.)
-- Bakes `MCP_TRANSPORT=streamable-http`, `MCP_HOST=0.0.0.0`, `MCP_PORT=8000`, `MCP_PATH=/mcp`, `OBSIDIAN_VAULT_PATH=/vault`, so the bare `CMD ["python", "mcp_server.py"]` launches in HTTP mode with the scheduler enabled.
-- `HEALTHCHECK` curls `http://localhost:8000/health` (which only exists in HTTP mode).
-- Runs as a **non-root** `brain` user (uid `1000` by default, override with `--build-arg BRAIN_UID=<host-uid>`). The uid matches the host vault owner so the bind-mounted `/vault` and `/backups` stay writable.
-- `.dockerignore` excludes docs (`README.md`, `SKILL.md`, `CLAUDE.md`), `__pycache__`, and `*.bak-premove`/`*.log`/`*.tar.gz`.
+- Installs `libgomp1` (faiss-cpu runtime), `curl` (healthcheck), `tzdata`
+  (TZ-aware schedule).
+- Dependencies are installed before `COPY *.py ./` so code-only changes only
+  re-run the cheap COPY layer. (`COPY *.py ./` bakes **all** top-level `.py`
+  modules.)
+- Bakes `MCP_TRANSPORT=streamable-http`, `MCP_HOST=0.0.0.0`, `MCP_PORT=8000`,
+  `MCP_PATH=/mcp`, `OBSIDIAN_VAULT_PATH=/vault`, so the bare
+  `CMD ["python", "mcp_server.py"]` launches in HTTP mode with the scheduler
+  enabled.
+- `HEALTHCHECK` curls `http://localhost:8000/health` (which only exists in HTTP
+  mode).
+- Runs as a **non-root** `brain` user (uid `1000` by default, override with
+  `--build-arg BRAIN_UID=<host-uid>`). The uid matches the host vault owner so
+  the bind-mounted `/vault` and `/backups` stay writable.
+- `.dockerignore` excludes docs (`README.md`, `SKILL.md`, `CLAUDE.md`),
+  `__pycache__`, and `*.bak-premove`/`*.log`/`*.tar.gz`.
 
-### Where it runs (from `deploy/README.md`)
+### Example deployment (`deploy/`)
 
-- **Compose file:** `deploy/docker-compose.yml` (single-service example), service `obsidian-brain-mcp`.
+- **Compose file:** `deploy/docker-compose.yml` (single-service example),
+  service `obsidian-brain-mcp`.
 - **Build context:** the repo root.
 - **Host port:** `8053` → container `8000`.
-- **Endpoints:** `http://<host>:8053/mcp` (MCP), `http://<host>:8053/health` (liveness).
-- **Network:** a local bridge (or an existing network shared with LM Studio, if it runs in Docker); the vault + backups dirs are bind-mounted.
-- **Volumes:** `<vault>:/vault` and `<backups>:/backups` (durable pre-edit backups, outside the vault).
-- **Hardening:** `security_opt: [no-new-privileges:true]`; compose-level healthcheck on `/health`.
+- **Endpoints:** `http://<host>:8053/mcp` (MCP), `http://<host>:8053/health`
+  (liveness).
+- **Network:** a local bridge (or an existing network shared with LM Studio,
+  if it runs in Docker); the vault + backups dirs are bind-mounted.
+- **Volumes:** `<vault>:/vault` and `<backups>:/backups` (durable pre-edit
+  backups, outside the vault).
+- **Hardening:** `security_opt: [no-new-privileges:true]`; compose-level
+  healthcheck on `/health`.
 
-The example service sets `OBSIDIAN_VAULT_PATH=/vault`, `LM_BASE_URL=http://localhost:1234/v1`,
-`TZ`, `BRAIN_REFRESH_AT_HOUR`, the `BRAIN_LINKER_ENABLED`/`BRAIN_LEDGER_ENABLED` maintenance
-switches and `MOC_BACKUP_DIR=/backups`; see `deploy/README.md` for the full variable table and
-Security section (bearer token, DNS-rebinding allowlist, reverse proxy).
+The example service sets `OBSIDIAN_VAULT_PATH=/vault`,
+`LM_BASE_URL=http://localhost:1234/v1`, `TZ`, `BRAIN_REFRESH_AT_HOUR`, the
+`BRAIN_LINKER_ENABLED`/`BRAIN_LEDGER_ENABLED` maintenance switches and
+`MOC_BACKUP_DIR=/backups`; see `deploy/README.md` for the full variable table
+and Security section (bearer token, DNS-rebinding allowlist, reverse proxy).
 
 ### Operate
 
@@ -433,34 +470,97 @@ docker logs obsidian-brain-mcp | grep -E 'linker|ledger'
 
 ## Nightly Maintenance Pipeline
 
-In **streamable-HTTP mode**, `_maybe_start_scheduler()` spawns a single daemon thread named `brain-refresh` (no external cron):
+In **streamable-HTTP mode**, `_maybe_start_scheduler()` spawns a single daemon
+thread named `brain-refresh` (no external cron):
 
-1. **On start (`BRAIN_REFRESH_ON_START=1`):** sleep 30s (let the server finish booting), then `build_index(force=False)` (rebuild only if the vault changed). If `BRAIN_POSTREFRESH_ON_START=1`, also run the maintenance scripts (off by default).
-2. **Nightly at `BRAIN_REFRESH_AT_HOUR` (local TZ):** `build_index(force=BRAIN_REFRESH_FORCE)`, then `_post_refresh_tasks()`.
+1. **On start (`BRAIN_REFRESH_ON_START=1`):** sleep 30s (let the server finish
+   booting), then `build_index(force=False)` (rebuild only if the vault
+   changed). If `BRAIN_POSTREFRESH_ON_START=1`, also run the maintenance
+   scripts (off by default).
+2. **Nightly at `BRAIN_REFRESH_AT_HOUR` (local TZ):**
+   `build_index(force=BRAIN_REFRESH_FORCE)`, then `_post_refresh_tasks()`.
 
-`_post_refresh_tasks()` runs two bundled scripts as subprocesses (each `timeout=3600s`, errors only logged — never fatal to the thread):
+`_post_refresh_tasks()` runs two bundled scripts as subprocesses (each
+`timeout=3600s`, errors only logged — never fatal to the thread):
 
-- **`moc_linker.py --apply --tag-notes --related`** (if `BRAIN_LINKER_ENABLED`): classifies each note into a MOC (chat endpoint), rewrites idempotent `- [[note]] — desc` blocks inside `MOCs/*.md`, stamps `moc:` frontmatter, and writes a top-5 semantic `## Related Notes` block per note (embeddings endpoint, O(n²) pure-Python similarity). Idempotency is enforced by managed comment markers (`<!-- moc-linker:begin/end -->`, `<!-- moc-linker:related:begin/end -->`); content outside those blocks is preserved. `Unsorted` notes are retried once and then surfaced for manual review (never written into a MOC).
-- **`ledger_update.py --apply`** (if `BRAIN_LEDGER_ENABLED`): scans notes edited within `--recent-days` (3), asks the chat model for (a) open items with explicit completion evidence and (b) genuinely new action items, flips matching checkboxes in place, and appends new items to the `<!-- ledger-auto -->` block in `open-action-items-ledger.md`. The hand-curated body and the moc-linker Related block are never clobbered. Hardening: completion candidates span **both** the curated body and the managed auto block (so auto-detected items can be checked off too); each proposed completion is only applied if the model's evidence quote is actually found in the note text (deterministic guard against hallucinated/injected completions); note bodies are fed to the model fenced as untrusted data so they cannot forge boundaries or smuggle instructions.
+- **`moc_linker.py --apply --tag-notes --related`** (if `BRAIN_LINKER_ENABLED`):
+  classifies each note into a MOC (chat endpoint), rewrites idempotent
+  `- [[note]] — desc` blocks inside `MOCs/*.md`, stamps `moc:` frontmatter, and
+  writes a top-5 semantic `## Related Notes` block per note (embeddings
+  endpoint, O(n²) pure-Python similarity). Idempotency is enforced by managed
+  comment markers (`<!-- moc-linker:begin/end -->`,
+  `<!-- moc-linker:related:begin/end -->`); content outside those blocks is
+  preserved. `Unsorted` notes are retried once and then surfaced for manual
+  review (never written into a MOC).
+- **`ledger_update.py --apply`** (if `BRAIN_LEDGER_ENABLED`): scans notes
+  edited within `--recent-days` (3), asks the chat model for (a) open items
+  with explicit completion evidence and (b) genuinely new action items, flips
+  matching checkboxes in place, and appends new items to the
+  `<!-- ledger-auto -->` block in `open-action-items-ledger.md`. The
+  hand-curated body and the moc-linker Related block are never clobbered.
+  Hardening: completion candidates span **both** the curated body and the
+  managed auto block; each proposed completion is only applied if the model's
+  evidence quote is actually found in the note text (a deterministic guard
+  against hallucinated/injected completions); note bodies are fed to the model
+  fenced as untrusted data so they cannot forge boundaries or smuggle
+  instructions.
 
-**Safety:** every file the scripts modify is backed up first to `MOC_BACKUP_DIR` (outside the vault). MOC and ledger backups are timestamped; note/related backups use a fixed filename and are overwritten on each run.
+**Safety:** every file the scripts modify is backed up first to
+`MOC_BACKUP_DIR` (outside the vault). MOC and ledger backups are timestamped;
+note/related backups use a fixed filename and are overwritten on each run.
 
-The index file-swap during `build_index` is locked via `indexer.INDEX_LOCK`, so live queries never observe a partial index while the nightly rebuild runs.
+The index file-swap during `build_index` is locked via
+`indexer.INDEX_LOCK`, so live queries never observe a partial index while the
+nightly rebuild runs.
 
 ---
 
 ## Key Design Decisions
 
-- **Markdown as the durable substrate.** No external DB. The FAISS index and metadata are a regenerable cache under `_brain/`; entity notes, MOC blocks, and the ledger are plain markdown written back into the vault.
-- **`_brain/` exclusion is centralized in `safe_paths.is_scannable_md`**, with each scanner (`scan_vault`, `tasks.py`, `moc_linker.scan_notes`) passing its own `include_entities`/`brain_top_level_only` flags, so the brain's own artifacts never feed back into the index or task lists — except `_brain/entities/`, which stays index-visible.
-- **Batched, retrying embeddings.** `embed_texts` embeds chunks in `EMBED_BATCH_SIZE` (default 64) batches, each retried with exponential backoff (`EMBED_MAX_RETRIES`) and an explicit per-request timeout (`EMBED_TIMEOUT`). A large vault never sends one oversized request, and a transient hiccup is retried rather than failing the whole build. A persistent failure still aborts before the swap, so the previous valid index is preserved.
-- **Atomic index swaps + in-process lock.** Writes go to `.tmp` files then `os.replace`; `INDEX_LOCK` (an `RLock`) serializes the brief read/write of the index files *within the process*. Cross-process safety relies on the atomic replaces alone.
-- **Delete/rename-aware incremental builds.** The freshness check compares a `vault_signature` (a hash of the sorted set of relative paths + mtimes) rather than just `max(mtime)`, so deletions and renames trigger a rebuild and stale chunks never linger. `--force` still re-embeds everything unconditionally.
-- **Crash-safe index swaps.** Writes go to `*.tmp` then `os.replace`; a leftover `*.tmp` from a crashed build is cleaned up at the next build; a cross-process file lock (`fcntl`) serializes builds so a manual `consolidate.py`/`indexer.py --force` cannot interleave its swap with the scheduler's; and the search-time consistency guard turns any residual index/metadata mismatch into a safe empty result.
-- **Two retrieval modes.** Semantic search for *relevance* (`brain_query`); a separate, index-free, deterministic layer for *exhaustive precision* over checkboxes (`brain_tasks` / `brain_complete_task`).
-- **Stateless streamable-HTTP by default.** Eliminates server-side session IDs that expire under long-lived clients (previously caused "Session terminated"/404 keepalive churn). Safe because all tools are plain request/response.
-- **Maintenance scripts are stdlib-only.** `moc_linker.py` and `ledger_update.py` use only `urllib`/`json`/`re` so a fresh clone can run them without pip. They talk to a configurable chat endpoint (defaults assume llama-swap reasoning models that emit `/no_think` and `reasoning_content`).
-- **Reversible, backed-up edits.** Every in-place vault edit is preceded by a backup written *outside* the vault, keeping Obsidian's graph view clean while preserving recovery.
+- **Markdown as the durable substrate.** No external DB. The FAISS index and
+  metadata are a regenerable cache under `_brain/`; entity notes, MOC blocks,
+  and the ledger are plain markdown written back into the vault. The vault can
+  be backed up, synced, or browsed as ordinary notes.
+- **`_brain/` exclusion is centralized in `safe_paths.is_scannable_md`**, with
+  each scanner (`scan_vault`, `tasks.py`, `moc_linker.scan_notes`) passing its
+  own `include_entities`/`brain_top_level_only` flags, so the brain's own
+  artifacts never feed back into the index or task lists — except
+  `_brain/entities/`, which stays index-visible.
+- **Batched, retrying embeddings.** `embed_texts` embeds chunks in
+  `EMBED_BATCH_SIZE` (default 64) batches, each retried with exponential
+  backoff (`EMBED_MAX_RETRIES`) and an explicit per-request timeout
+  (`EMBED_TIMEOUT`). A large vault never sends one oversized request, and a
+  transient hiccup is retried rather than failing the whole build. A persistent
+  failure still aborts before the swap, so the previous valid index is
+  preserved.
+- **Atomic index swaps + in-process lock.** Writes go to `.tmp` files then
+  `os.replace`; `INDEX_LOCK` (an `RLock`) serializes the brief read/write of
+  the index files *within the process*. Cross-process safety relies on the
+  atomic replaces alone.
+- **Delete/rename-aware incremental builds.** The freshness check compares a
+  `vault_signature` (a hash of the sorted set of relative paths + mtimes)
+  rather than just `max(mtime)`, so deletions and renames trigger a rebuild and
+  stale chunks never linger. `--force` still re-embeds everything
+  unconditionally.
+- **Crash-safe index swaps.** Writes go to `*.tmp` then `os.replace`; a
+  leftover `*.tmp` from a crashed build is cleaned up at the next build; a
+  cross-process file lock (`fcntl`) serializes builds so a manual
+  `consolidate.py`/`indexer.py --force` cannot interleave its swap with the
+  scheduler's; and the search-time consistency guard turns any residual
+  index/metadata mismatch into a safe empty result.
+- **Two retrieval modes.** Semantic search for *relevance* (`brain_query`); a
+  separate, index-free, deterministic layer for *exhaustive precision* over
+  checkboxes (`brain_tasks` / `brain_complete_task`).
+- **Stateless streamable-HTTP by default.** Eliminates server-side session IDs
+  that expire under long-lived clients (previously caused "Session
+  terminated"/404 keepalive churn). Safe because all tools are plain
+  request/response.
+- **Maintenance scripts are stdlib-only.** `moc_linker.py` and
+  `ledger_update.py` use only `urllib`/`json`/`re` so a fresh clone can run
+  them without pip. They talk to a configurable chat endpoint.
+- **Reversible, backed-up edits.** Every in-place vault edit is preceded by a
+  backup written *outside* the vault, keeping Obsidian's graph view clean
+  while preserving recovery.
 
 ---
 
@@ -469,11 +569,11 @@ The index file-swap during `build_index` is locked via `indexer.INDEX_LOCK`, so 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
 | `brain_query` / search returns "No relevant notes found." or `[]` | The index doesn't exist yet or has no chunks. Run `python3 indexer.py --force` (embeddings endpoint must be up), or call `brain_build_index(force=true)`. |
-| Build hangs or errors on `Generating embeddings…` | The LM Studio embeddings endpoint at `config.LM_BASE_URL` (`http://localhost:1234/v1`) is unreachable or the model isn't loaded. Embeddings now retry with backoff and time out after `EMBED_TIMEOUT` (30s) per batch; a persistent failure aborts the build but leaves the previous index intact. |
+| Build hangs or errors on `Generating embeddings…` | The embeddings endpoint at `LM_BASE_URL` (default `http://localhost:1234/v1`) is unreachable or the model isn't loaded. Embeddings retry with backoff and time out after `EMBED_TIMEOUT` (30s) per batch; a persistent failure aborts the build but leaves the previous index intact. |
 | A deleted/renamed note still appears in search results | Should self-correct: the freshness check is `vault_signature`-based and rebuilds on any set change. If results still look stale, force a rebuild: `python3 indexer.py --force` or `brain_build_index(force=true)`. |
 | HTTP tool calls return `401` | The server has `BRAIN_AUTH_TOKEN` set; send `Authorization: Bearer <token>`. `GET /health` is exempt. |
 | Changed `LM_BASE_URL`/`EMBEDDING_MODEL` env vars but results look stale | The next `build_index` call detects the changed `index_params` and does a full reindex automatically; trigger it with `POST /refresh` or `brain_build_index` rather than waiting for the nightly run. |
-| `brain_status` reports a different `embedding_model` than expected | `metadata.json` records the model used at build time; if you changed the model in `config.py`, rebuild with `--force` (search does not validate the model match). |
+| `brain_status` reports a different `embedding_model` than expected | `metadata.json` records the model used at build time; if you changed the model, rebuild with `--force` (search does not validate the model match). |
 | `consolidate.py` exits immediately with `ERROR: OBSIDIAN_VAULT_PATH not set` | It hard-requires the env var, and `config.py` no longer ships a default path. Set `OBSIDIAN_VAULT_PATH`. |
 | `brain_complete_task` returns `ambiguous` or `error` and writes nothing | The `match` substring must identify exactly one open task in the note. Make it more specific. |
 | `brain_write_entity` didn't update an existing entity with new `initial_content` | By design — an existing entity file is returned untouched; it is never overwritten. Use `brain_append_insight` to add to it. |
@@ -486,4 +586,34 @@ The index file-swap during `build_index` is locked via `indexer.INDEX_LOCK`, so 
 
 ---
 
-Relevant source files: `config.py`, `embedder.py`, `indexer.py`, `searcher.py`, `brain.py`, `tasks.py`, `consolidate.py`, `mcp_server.py`, `moc_linker.py`, `ledger_update.py`, `Dockerfile`, `requirements.txt`, `.dockerignore`, `deploy/README.md`.
+## Development & Testing
+
+A `pytest` suite under `tests/` covers the path-containment guard, HTTP auth
+middleware, embedding batching/retry, index durability (delete-aware rebuild,
+consistency guard, corrupt-metadata resilience), write-path contracts, and the
+ledger logic (JSON extraction, evidence validation, auto-block completion). It
+uses a temp vault and a deterministic in-process fake embedder, so **no
+network or real vault is required**.
+
+```bash
+pip install pytest
+python -m pytest tests/ -q
+```
+
+Module layout: `config.py` (paths + model settings), `embedder.py`
+(OpenAI-compatible client), `indexer.py` (scan/chunk/embed/build),
+`searcher.py` (kNN search + formatting), `brain.py` (orchestration facade),
+`tasks.py` (deterministic checkboxes), `mcp_server.py` (MCP server +
+scheduler), and the maintenance scripts `moc_linker.py`, `ledger_update.py`,
+`truth_maintenance.py`, `task_sweep.py`. Full details in the
+[Architecture](#architecture) section.
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
+
+*Built on [Model Context Protocol](https://modelcontextprotocol.io),
+[FAISS](https://faiss.ai), [LM Studio](http://lmstudio.ai), and
+[Obsidian](https://obsidian.md).*

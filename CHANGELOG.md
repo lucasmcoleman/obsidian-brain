@@ -44,6 +44,15 @@ This project does not currently cut versioned releases; entries accumulate under
   `/path/to/vault`, `localhost:1234`, `brain.example.com`) instead of live
   deployment details; first-person and personal-name references were
   genericized.
+- (2026-08-12) README.md restructured to be public-facing: a first-time-user
+  path (pitch → Quick Start → connect-an-agent) replaces the previous
+  changelog-style opening, the dated 2026-07 "human-facing surfaces" callout
+  was folded into Features (web UI, Obsidian plugin, provenance-aware
+  retrieval, `truth_maintenance.py`), internal-ops asides were dropped (commit
+  refs, "(different default than config.py!)" notes, "the deploy compose"
+  phrasing), and a License section was added. All environment variables,
+  defaults, flags, exit codes, and tool signatures are unchanged. Verified:
+  re-read against the pre-rewrite content; no code touched.
 - (2026-08-09) The four OAuth public-path strings in `mcp_server.py` are now
   module-level constants used both by the route decorators and by the auth
   middleware's `public_paths` set, instead of being typed twice. Reason: auth
