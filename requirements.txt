@@ -1,0 +1,10 @@
+# Bounded version ranges: lower bound = known-good, upper bound caps the major so
+# a cache-miss rebuild on a fresh host can't silently pull an incompatible major
+# and break the container. pytest is a test-only dep and is
+# installed separately in CI, not here.
+faiss-cpu>=1.9,<2
+numpy>=1.24,<3
+openai>=2.0,<3
+requests>=2.31,<3
+mcp>=1.26,<2
+uvicorn>=0.30,<1

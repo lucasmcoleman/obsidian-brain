@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-brain",
+  "name": "Obsidian Brain",
+  "version": "0.1.0",
+  "minAppVersion": "1.4.0",
+  "description": "Active-note-aware companion for the Obsidian Brain semantic search server: a live related-notes panel, an \"ask the brain\" command that inserts wikilinks, and a manual index-refresh command.",
+  "author": "Lucas Coleman",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}

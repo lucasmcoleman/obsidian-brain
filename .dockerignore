@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.bak-premove
+*.tmp
+*.log
+*.tar.gz
+README.md
+SKILL.md
+CLAUDE.md
+.git/
+.github/
+.venv/
+venv/
+.pytest_cache/
+tests/
+plugin/
+eval/

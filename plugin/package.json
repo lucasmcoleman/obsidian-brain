@@ -1,0 +1,21 @@
+{
+  "name": "obsidian-brain-plugin",
+  "version": "0.1.0",
+  "description": "Obsidian companion plugin for the Obsidian Brain semantic search server — a live related-notes panel and an ask-the-brain command that uses the active note as context.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production"
+  },
+  "keywords": [],
+  "author": "Lucas Coleman",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "^0.19.11",
+    "obsidian": "^1.4.11",
+    "tslib": "^2.6.2",
+    "typescript": "^5.3.3"
+  }
+}

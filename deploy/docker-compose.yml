@@ -1,0 +1,45 @@
+# Obsidian Brain — example single-service deployment.
+#
+# Usage:  cd deploy && docker compose up -d --build obsidian-brain-mcp
+#
+# Prerequisites: an OpenAI-compatible embeddings endpoint (LM Studio, default
+# http://localhost:1234/v1) and a vault directory on the host. Set the vault
+# token before starting:
+#     export BRAIN_AUTH_TOKEN=$(openssl rand -hex 32)
+# (The compose file reads it from the shell environment or a .env file.)
+
+services:
+  obsidian-brain-mcp:
+    build:
+      context: ..
+    container_name: obsidian-brain-mcp
+    restart: unless-stopped
+    ports:
+      # Loopback ONLY. The tools read AND write the vault — reach the service
+      # remotely via SSH port-forward or a reverse proxy (see deploy/README.md),
+      # never a raw LAN publish.
+      - "127.0.0.1:8053:8000"
+    volumes:
+      - /path/to/vault:/vault
+      - /path/to/backups:/backups   # durable pre-edit backups (outside the vault)
+    environment:
+      - OBSIDIAN_VAULT_PATH=/vault
+      - LM_BASE_URL=http://localhost:1234/v1
+      - EMBEDDING_MODEL=text-embedding-nomic-embed-text-v2-moe
+      - BRAIN_AUTH_TOKEN=${BRAIN_AUTH_TOKEN:?set BRAIN_AUTH_TOKEN first (openssl rand -hex 32)}
+      - BRAIN_REFRESH_AT_HOUR=3
+      - TZ=UTC
+      # Nightly maintenance after the index refresh (MOC/Related linker + ledger).
+      # Requires an OpenAI-compatible CHAT endpoint; defaults to LM_BASE_URL.
+      # Set LINKER_CHAT_URL / LINKER_CHAT_MODEL explicitly if using llama-swap.
+      - BRAIN_LINKER_ENABLED=1
+      - BRAIN_LEDGER_ENABLED=1
+      - MOC_BACKUP_DIR=/backups
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
