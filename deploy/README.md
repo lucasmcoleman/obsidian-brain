@@ -4,6 +4,13 @@ The brain runs as a containerized **streamable-HTTP MCP server** so any remote a
 can reach it. The image is self-contained (brain modules + `mcp_server.py` baked in);
 the vault is bind-mounted at runtime.
 
+The director workspace is at `/ui`; its [guide](../docs/director-workspace.md)
+describes first use, record backups, and extraction settings. The existing token
+protects its data APIs. `/ui/legacy` retains source tasks and service status.
+Rebuild the image to include the new `web/` assets. Back up `Brain Workspace/`
+alongside source notes. Scheduled ledger/task-sweep mutations now default off;
+restoring them requires `BRAIN_LEGACY_AUTOWRITE=1` plus their existing flags.
+
 ## Where it runs
 
 - **Compose:** `docker-compose.yml` in this directory (single-service example), service `obsidian-brain-mcp`

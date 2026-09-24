@@ -127,6 +127,8 @@ def scan_notes(vault: Path, include_dailies: bool) -> list[dict[str, Any]]:
         if not include_dailies and rel.parts and rel.parts[0] == "Daily Notes":
             continue
         try:
+            from safe_paths import resolve_in_vault
+            resolve_in_vault(str(md), str(vault))
             text = md.read_text(encoding="utf-8")
         except Exception as e:
             print(f"  ! skip {rel}: {e}", file=sys.stderr)

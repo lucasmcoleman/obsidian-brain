@@ -41,6 +41,7 @@ def _point_at(brain_dir: str) -> None:
     meta_path = str(bd / "metadata.json")
     for mod in (config, indexer):
         mod.BRAIN_DIR = str(bd)
+        mod.ENTITIES_DIR = str(bd / "entities")
         mod.INDEX_PATH = index_path
         mod.METADATA_PATH = meta_path
     searcher.INDEX_PATH = index_path

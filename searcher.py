@@ -4,6 +4,7 @@ Semantic search over the Obsidian Brain index.
 import json
 import os
 import sys
+import hashlib
 from pathlib import Path
 
 import faiss
@@ -41,12 +42,16 @@ from indexer import INDEX_LOCK
 _INDEX_CACHE: dict = {}
 
 
+class SearchUnavailable(RuntimeError):
+    pass
+
+
 def _stat_key(path: str) -> tuple:
     st = os.stat(path)
     return (st.st_ino, st.st_mtime_ns, st.st_size)
 
 
-def search(query: str, top_k: int = TOP_K) -> list[dict]:
+def search(query: str, top_k: int = TOP_K, *, strict: bool = False) -> list[dict]:
     """
     Search the index for notes relevant to the query.
     Returns a list of result dicts with text, note_path, and score (descending),
@@ -64,32 +69,44 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         top_k = TOP_K
     top_k = max(1, min(top_k, SEARCH_MAX_TOP_K))
     query = (query or "")[:SEARCH_MAX_QUERY_CHARS]
+    def unavailable(message):
+        if strict:
+            raise SearchUnavailable(message)
+        return []  # legacy library callers retain their list-returning contract
 
     # Read the index + metadata together under the lock so we never load a
     # new index against stale metadata (or a half-written file) mid-rebuild.
     with INDEX_LOCK:
         if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
             _INDEX_CACHE.clear()
-            return []
+            return unavailable("Semantic index unavailable. Scan/build the index or use exact-word search.")
         try:
             key = (_stat_key(INDEX_PATH), _stat_key(METADATA_PATH))
             cached = _INDEX_CACHE.get("entry")
             if cached and cached[0] == key:
                 index, metadata = cached[1], cached[2]
             else:
-                index = faiss.read_index(INDEX_PATH)
                 metadata = json.loads(Path(METADATA_PATH).read_text())
+                target = Path(INDEX_PATH)
+                if metadata.get("index_file"):
+                    name = metadata["index_file"]
+                    if not isinstance(name, str) or Path(name).name != name or not name.startswith("index-"):
+                        raise ValueError("invalid index generation")
+                    target = target.parent / name
+                    if hashlib.sha256(target.read_bytes()).hexdigest() != metadata.get("index_sha256"):
+                        raise ValueError("index generation checksum mismatch")
+                index = faiss.read_index(str(target))
                 _INDEX_CACHE["entry"] = (key, index, metadata)
-        except (json.JSONDecodeError, OSError, RuntimeError) as e:
+        except (ValueError, OSError, RuntimeError) as e:
             _INDEX_CACHE.clear()
             print(f"[searcher] index/metadata unreadable, returning no results: {e}",
                   file=sys.stderr)
-            return []
+            return unavailable("Semantic index unavailable or inconsistent. Rebuild it; exact-word search remains independent.")
 
     chunks = metadata.get("chunks", [])
 
     if not chunks:
-        return []
+        return [] if index.ntotal == 0 else unavailable("Index and evidence are inconsistent. Rebuild before semantic search.")
 
     # Consistency guard: FAISS row i must map to chunks[i]. A crash between the
     # two os.replace calls (or an external/partial write) can leave the index and
@@ -99,7 +116,7 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         print(f"[searcher] index/metadata out of sync "
               f"(ntotal={index.ntotal}, chunks={len(chunks)}); rebuild needed",
               file=sys.stderr)
-        return []
+        return unavailable("Index and evidence are inconsistent. Rebuild before semantic search.")
 
     # Query gets the nomic "search_query: " prefix to match the "search_document: "
     # prefix on indexed passages; both must be applied together (M-A).
@@ -110,7 +127,7 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         # an outage is visible in the container logs rather than silent.
         print(f"[searcher] query embedding failed, returning no results: {e}",
               file=sys.stderr)
-        return []
+        return unavailable("Semantic search is unavailable because the embedding service could not be reached. Try exact-word search.")
     query_vec = np.array([query_embedding]).astype("float32")
 
     # Dimension guard (July-1 M-3): mid-migration to a new embedding model the
@@ -121,7 +138,7 @@ def search(query: str, top_k: int = TOP_K) -> list[dict]:
         print(f"[searcher] query dim {query_vec.shape[1]} != index dim {index.d} — "
               f"embedding model changed; rebuild needed (returning no results)",
               file=sys.stderr)
-        return []
+        return unavailable("Embedding model does not match the index. Rebuild before semantic search.")
 
     # Retrieve a generous candidate pool so dedup-to-one-chunk-per-note can still
     # fill top_k even when several of the nearest chunks belong to one big note
@@ -185,7 +202,7 @@ def format_results(results: list[dict], query: str) -> str:
         elif status == "unreviewed" and r.get("source_type") in ("transcript", "ocr"):
             flag = f"  ⚠️ UNREVIEWED {r['source_type'].upper()} (raw import, may contain errors)"
         lines.append(f"### {i}. {r['note_path']} (score: {r['score']}){flag}")
-        lines.append(f"```\n{r['text'][:500]}{'...' if len(r['text']) > 500 else ''}\n```")
+        lines.append(f"```\n{r['text']}\n```")
         lines.append("")
 
     return "\n".join(lines)

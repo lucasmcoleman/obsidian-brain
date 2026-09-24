@@ -24,6 +24,7 @@ RUN pip install -r requirements.txt
 
 # Application code (brain modules + MCP server).
 COPY *.py ./
+COPY web/ ./web/
 
 # Run as a non-root user. UID defaults to 1000 to match the
 # host vault owner so the bind-mounted vault + backups stay writable; override

@@ -1,30 +1,34 @@
 # Obsidian Brain
 
-**Your Obsidian vault, queryable by your AI agents — fully local, nothing leaves
-your machine.**
+**A daily workspace for projects, clients, people, commitments and decisions,
+backed by your Obsidian vault.**
 
-Obsidian Brain turns a directory of `.md` notes into a semantic memory layer for
-AI agents. It indexes your vault into a local [FAISS](https://faiss.ai) vector
-index, exposes it to agents as a set of [MCP](https://modelcontextprotocol.io)
-tools, and runs a nightly maintenance pipeline that keeps your index fresh,
-organizes notes into Maps-of-Content (MOCs), cross-links related notes, and
-maintains an action-items ledger — all over **local** LLM endpoints (LM Studio,
-llama-swap, or any OpenAI-compatible server). No API keys, no cloud calls.
+Open `/ui` on the existing brain server to see what needs attention, review
+source-backed observations, and prepare project/client/person briefs. Markdown
+records preserve accepted decisions; SQLite provides rebuildable search and
+processing checkpoints. Exact-word lookup and checkbox intake work without a
+model. Semantic search and optional meeting extraction use your configured
+OpenAI-compatible endpoints.
 
-Highlights:
+Start with the [Director workspace guide](docs/director-workspace.md). The
+[September audit](docs/audits/2026-09-10-second-brain-audit.md) explains the problems
+and longer-term direction.
 
-- **Zero-data-leak by construction** — embeddings and reasoning run against LAN
-  endpoints; no third party ever sees your notes.
-- **Agent-native** — a single MCP server with two transports (`stdio` for local
-  agents, `streamable-HTTP` for remote ones) and identical tool behavior.
-- **Two retrieval modes** — semantic search for *relevance*, plus an
-  index-free deterministic layer for *exhaustive* checkbox-task queries.
-- **Write-back** — agents create entity notes and append dated insights into
-  your vault as plain Markdown.
-- **Self-maintaining** — nightly index rebuild, MOC classification, Related
-  Notes cross-linking, and an action-items ledger, with no external cron.
-- **Bonus surfaces** — a bearer-gated web UI, an optional Obsidian plugin, and
-  provenance-aware retrieval that flags superseded or contested notes.
+- **Attention with reasons:** deadlines, blockers, waiting responses, open decisions,
+  unknown owners, changed evidence and stale project confirmations.
+- **Review before acceptance:** historical notes and model proposals never become
+  current obligations automatically. Each decision retains its original evidence.
+- **Connected views:** Today, All work, Projects, Clients, People, Review, Decisions,
+  and Sources, with the same capabilities exposed through MCP.
+- **Durable records:** version-checked changes and history in `Brain Workspace/`.
+- **Full-note extraction:** background processing with visible failures and retries.
+- **Existing tools retained:** semantic retrieval, deterministic source tasks,
+  write-back, MOC maintenance and the legacy UI at `/ui/legacy`.
+
+Local/LAN endpoints keep model processing on that infrastructure. Connected MCP
+clients and any remote endpoints you configure may receive vault information.
+Scheduled legacy ledger/task-sweep mutations now require the additional explicit
+`BRAIN_LEGACY_AUTOWRITE=1` flag; they are disabled by default.
 
 ---
 
@@ -54,7 +58,7 @@ Highlights:
   default `http://localhost:1234/v1`, serving
   `text-embedding-nomic-embed-text-v2-moe`. Embedding and querying both require
   this endpoint to be up.
-- For the nightly maintenance scripts only: a local OpenAI-compatible **chat**
+- For meeting extraction and the nightly maintenance scripts: a local OpenAI-compatible **chat**
   endpoint (the defaults assume llama-swap at `http://localhost:4004/v1`,
   model `unsloth/Qwen3.6-35B-A3B-MTP-GGUF`).
 
@@ -110,9 +114,9 @@ ssh user@server -L 8053:localhost:8053   # then point the client at localhost:80
 ```
 
 > **Authentication:** set `BRAIN_AUTH_TOKEN` to require
-> `Authorization: Bearer <token>` on every HTTP request (except `GET /health`).
+> `Authorization: Bearer <token>` on HTTP data/tool requests. The health route, UI shell/assets and OAuth discovery routes are public.
 > If it is unset the HTTP tools are **unauthenticated** — anyone who can reach
-> `host:8053` can read and write the vault — so restrict the port to a trusted
+> `host:8053` can access unprotected tools (workspace HTTP writes remain disabled without a token) — so restrict the port to a trusted
 > network. The server logs a loud warning at startup when no token is
 > configured.
 
@@ -130,16 +134,14 @@ ssh user@server -L 8053:localhost:8053   # then point the client at localhost:80
 - **Two MCP transports** from a single entrypoint — `stdio` for local agents,
   `streamable-HTTP` for remote/containerized agents, identical tools.
 - **Incremental, concurrency-safe index builds** — mtime + signature-based
-  skip of unchanged vaults, atomic `os.replace` index swaps, in-process
-  `RLock` so live queries never see a partial index.
+  skip of unchanged vaults, immutable checksummed index generations and cross-process build serialization.
 - **Baked-in nightly maintenance** (HTTP mode) — automatic index rebuild plus
-  MOC classification, "Related Notes" cross-linking, and action-items ledger
-  updates, with no external cron.
+  MOC classification, "Related Notes" cross-linking, and optional legacy action-items ledger updates, with no external cron. Legacy
+  ledger/sweep mutations require `BRAIN_LEGACY_AUTOWRITE=1`.
 - **Reversible vault edits** — every file the maintenance scripts touch is
   backed up first to a directory **outside** the vault.
-- **Web UI** — a bearer-gated interface at `GET /ui` (search, open tasks,
-  status, append-insight) plus a `POST /refresh` endpoint for on-demand
-  incremental reindex.
+- **Web UI** — the director workspace at `/ui`, legacy search/tasks/status at
+  `/ui/legacy`, and `POST /refresh` for on-demand incremental reindex.
 - **Obsidian plugin** — `plugin/` (install via BRAT) adds a Related Notes panel
   for the active note and an "ask the brain" command.
 - **Provenance-aware retrieval** — notes marked `review_status: superseded` /
@@ -319,6 +321,10 @@ nothing to do / dry-run), `2` if the ledger file is missing.
 
 ## MCP Tools
 
+The ten director-workspace tools are documented in the
+[workspace guide](docs/director-workspace.md#agent-and-api-interface). Existing
+retrieval, source-task and write-back tools remain available below.
+
 | Tool | Signature | When to use |
 |------|-----------|-------------|
 | `brain_query` | `brain_query(query: str, top_k: int = 5) -> str` | Semantic recall. Call before answering about people, projects, clients, decisions, or past conversations. Returns a formatted context block of the most relevant note excerpts; `top_k` caps distinct notes. |
@@ -332,6 +338,10 @@ nothing to do / dry-run), `2` if the ledger file is missing.
 ---
 
 ## Configuration
+
+Workspace extraction adds `WORKSPACE_CHAT_URL` and `WORKSPACE_CHAT_MODEL`, falling
+back to the existing ledger/linker settings. Scheduled legacy ledger and task-sweep
+mutations also require `BRAIN_LEGACY_AUTOWRITE=1` (default `0`).
 
 There is one environment variable that governs the **core** pipeline
 (`OBSIDIAN_VAULT_PATH`); the remaining knobs are split between the MCP server's
@@ -474,11 +484,11 @@ In **streamable-HTTP mode**, `_maybe_start_scheduler()` spawns a single daemon
 thread named `brain-refresh` (no external cron):
 
 1. **On start (`BRAIN_REFRESH_ON_START=1`):** sleep 30s (let the server finish
-   booting), then `build_index(force=False)` (rebuild only if the vault
+   booting), then workspace source intake and `build_index(force=False)` (rebuild only if the vault
    changed). If `BRAIN_POSTREFRESH_ON_START=1`, also run the maintenance
    scripts (off by default).
 2. **Nightly at `BRAIN_REFRESH_AT_HOUR` (local TZ):**
-   `build_index(force=BRAIN_REFRESH_FORCE)`, then `_post_refresh_tasks()`.
+   workspace source intake, `build_index(force=BRAIN_REFRESH_FORCE)`, then `_post_refresh_tasks()`.
 
 `_post_refresh_tasks()` runs two bundled scripts as subprocesses (each
 `timeout=3600s`, errors only logged — never fatal to the thread):
@@ -492,7 +502,7 @@ thread named `brain-refresh` (no external cron):
   `<!-- moc-linker:related:begin/end -->`); content outside those blocks is
   preserved. `Unsorted` notes are retried once and then surfaced for manual
   review (never written into a MOC).
-- **`ledger_update.py --apply`** (if `BRAIN_LEDGER_ENABLED`): scans notes
+- **`ledger_update.py --apply`** (if `BRAIN_LEGACY_AUTOWRITE=1` and `BRAIN_LEDGER_ENABLED`): scans notes
   edited within `--recent-days` (3), asks the chat model for (a) open items
   with explicit completion evidence and (b) genuinely new action items, flips
   matching checkboxes in place, and appends new items to the
@@ -568,7 +578,7 @@ nightly rebuild runs.
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `brain_query` / search returns "No relevant notes found." or `[]` | The index doesn't exist yet or has no chunks. Run `python3 indexer.py --force` (embeddings endpoint must be up), or call `brain_build_index(force=true)`. |
+| Search reports unavailable or returns HTTP 503 | The index is missing/corrupt, the model is unavailable, or its dimensions do not match. Check the service and run `python3 indexer.py --force` (embeddings endpoint must be up), or call `brain_build_index(force=true)`. |
 | Build hangs or errors on `Generating embeddings…` | The embeddings endpoint at `LM_BASE_URL` (default `http://localhost:1234/v1`) is unreachable or the model isn't loaded. Embeddings retry with backoff and time out after `EMBED_TIMEOUT` (30s) per batch; a persistent failure aborts the build but leaves the previous index intact. |
 | A deleted/renamed note still appears in search results | Should self-correct: the freshness check is `vault_signature`-based and rebuilds on any set change. If results still look stale, force a rebuild: `python3 indexer.py --force` or `brain_build_index(force=true)`. |
 | HTTP tool calls return `401` | The server has `BRAIN_AUTH_TOKEN` set; send `Authorization: Bearer <token>`. `GET /health` is exempt. |
@@ -603,7 +613,9 @@ python -m pytest tests/ -q
 Module layout: `config.py` (paths + model settings), `embedder.py`
 (OpenAI-compatible client), `indexer.py` (scan/chunk/embed/build),
 `searcher.py` (kNN search + formatting), `brain.py` (orchestration facade),
-`tasks.py` (deterministic checkboxes), `mcp_server.py` (MCP server +
+`tasks.py` (deterministic checkboxes), `workspace.py` (records/attention/FTS),
+`workspace_api.py` (HTTP/MCP), `workspace_extract.py` (background extraction),
+`web/` (director interface), `mcp_server.py` (MCP server +
 scheduler), and the maintenance scripts `moc_linker.py`, `ledger_update.py`,
 `truth_maintenance.py`, `task_sweep.py`. Full details in the
 [Architecture](#architecture) section.

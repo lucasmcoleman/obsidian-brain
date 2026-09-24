@@ -8,6 +8,8 @@ import os
 import re
 import sys
 import threading
+import shutil
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -17,12 +19,13 @@ import numpy as np
 
 from config import VAULT_PATH, BRAIN_DIR, ENTITIES_DIR, INDEX_PATH, METADATA_PATH, CHUNK_SIZE, CHUNK_OVERLAP, EMBEDDING_MODEL, EMBED_DOC_PREFIX
 from embedder import embed_texts
-from safe_paths import is_scannable_md
+from safe_paths import is_scannable_md, resolve_in_vault, PathOutsideVault
 
 # Serializes the brief index file read (searcher) and write (build_index) within
 # this process, so a concurrent search never sees a half-written or mismatched
 # index. The heavy work (scan + embed) runs OUTSIDE the lock.
 INDEX_LOCK = threading.RLock()
+BUILD_LOCK = threading.RLock()
 
 
 def ensure_dirs():
@@ -78,12 +81,12 @@ def _save_emb_cache(cache: dict) -> None:
         print(f"[indexer] could not write embedding cache: {e}", file=sys.stderr)
 
 
-def _embed_chunks_cached(chunk_texts: list[str]) -> list:
+def _embed_chunks_cached(chunk_texts: list[str], force: bool = False) -> list:
     """Return an embedding per chunk, embedding ONLY texts not already in the cache
     (keyed by content hash), so a rebuild after a small edit re-embeds just the
     changed chunks instead of the whole vault (capability #2). The cache is pruned
     to the current chunk set each build so it can't grow unbounded."""
-    cache = _load_emb_cache()
+    cache = {} if force else _load_emb_cache()
     keys = [_emb_key(t) for t in chunk_texts]
     missing_idx = [i for i, k in enumerate(keys) if k not in cache]
     if missing_idx:
@@ -178,6 +181,12 @@ def _index_is_consistent(existing_meta: dict[str, Any]) -> bool:
               f"(ntotal={idx.ntotal}, chunks={len(existing_meta.get('chunks', []))}); "
               f"forcing rebuild", file=sys.stderr)
         return False
+    if existing_meta.get("index_file"):
+        target = Path(INDEX_PATH).parent / existing_meta["index_file"]
+        if target.name != existing_meta["index_file"] or not target.is_file():
+            return False
+        if hashlib.sha256(target.read_bytes()).hexdigest() != existing_meta.get("index_sha256"):
+            return False
     return True
 
 
@@ -292,6 +301,7 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
         if _is_excluded_path(rel_path):
             continue
         try:
+            resolve_in_vault(str(md_file), str(vault))
             content = md_file.read_text(encoding="utf-8")
             # Strip Obsidian metadata frontmatter (but first lift the truth-status
             # keys out of it — Layer 4 of truth maintenance).
@@ -315,7 +325,7 @@ def scan_vault(vault_path: str) -> list[dict[str, Any]]:
                 "mtime": os.path.getmtime(md_file),
                 "truth": truth,
             })
-        except (OSError, UnicodeDecodeError) as e:
+        except (OSError, UnicodeDecodeError, PathOutsideVault) as e:
             # Don't silently drop notes — a consistently-failing note should be
             # visible, not invisibly missing from the index .
             print(f"[indexer] skipping unreadable note {rel_path}: {e}", file=sys.stderr)
@@ -328,6 +338,13 @@ def build_index(force: bool = False) -> dict[str, Any]:
     Scan the vault, chunk all notes, generate embeddings, and build the FAISS index.
     Returns a summary dict.
     """
+    if not Path(VAULT_PATH).is_dir():
+        raise RuntimeError("Vault is unavailable; refusing to replace its index.")
+    with BUILD_LOCK, _build_lock():
+        return _build_index_locked(force)
+
+
+def _build_index_locked(force: bool = False) -> dict[str, Any]:
     ensure_dirs()
 
     notes = scan_vault(VAULT_PATH)
@@ -373,23 +390,22 @@ def build_index(force: bool = False) -> dict[str, Any]:
 
     print(f"Created {len(all_chunks)} chunks")
 
-    if not all_chunks:
-        return {"status": "no_content", "notes": 0}
-
     print("Generating embeddings...")
     # Embed via the content-hash cache so only new/changed chunks hit the endpoint;
     # the EMBED_DOC_PREFIX (nomic task instruction) is applied to the embed INPUT
     # only, so the stored chunk text stays clean for retrieval (M-A / capability #2).
-    embeddings = _embed_chunks_cached([c["text"] for c in all_chunks])
+    embeddings = _embed_chunks_cached([c["text"] for c in all_chunks], force=force) if all_chunks else []
 
     # Build FAISS index
-    dim = len(embeddings[0])
+    dim = len(embeddings[0]) if embeddings else 1
     index = faiss.IndexFlatL2(dim)
-    index.add(np.array(embeddings).astype("float32"))
+    if embeddings:
+        index.add(np.array(embeddings).astype("float32"))
 
     metadata = {
         "chunks": all_chunks,
-        "index_mtime": max(n["mtime"] for n in notes),
+        "index_mtime": max((n["mtime"] for n in notes), default=0),
+        "built_at": time.time(),
         "vault_signature": _vault_signature(notes),
         "num_notes": len(notes),
         "num_chunks": len(all_chunks),
@@ -403,13 +419,24 @@ def build_index(force: bool = False) -> dict[str, Any]:
     # its file swap with the scheduler's (M2); the in-process INDEX_LOCK still
     # guards same-process readers. Writes go to *.tmp then os.replace so a
     # concurrent search sees either the complete old or complete new index.
-    with _build_lock(), INDEX_LOCK:
+    with INDEX_LOCK:
         # Clear leftover *.tmp from a crashed prior build INSIDE the lock, so a
         # concurrent build can't delete this build's in-flight tmp mid-swap (low-2).
         cleanup_tmp_files()
         tmp_index = INDEX_PATH + ".tmp"
         tmp_meta = METADATA_PATH + ".tmp"
         faiss.write_index(index, tmp_index)
+        digest = hashlib.sha256(Path(tmp_index).read_bytes()).hexdigest()
+        generation = "index-" + digest + ".faiss"
+        metadata.update(index_file=generation, index_sha256=digest)
+        immutable = Path(INDEX_PATH).parent / generation
+        # metadata.json is the single publication pointer. Readers keep using the
+        # prior immutable index until this pointer is atomically replaced.
+        immutable_tmp = str(immutable) + ".tmp"
+        shutil.copyfile(tmp_index, immutable_tmp)
+        _fsync_path(immutable_tmp)
+        os.replace(immutable_tmp, immutable)
+        _fsync_path(str(immutable))
         Path(tmp_meta).write_text(json.dumps(metadata, indent=2), encoding="utf-8")
         # fsync the tmp files before the replaces, and the directory after, so a
         # crash can't leave a torn index/metadata pair on disk (low-1).
@@ -420,7 +447,7 @@ def build_index(force: bool = False) -> dict[str, Any]:
         _fsync_path(BRAIN_DIR)
 
     print(f"Index saved: {INDEX_PATH}")
-    return {"status": "built", "notes": len(notes), "chunks": len(all_chunks), "path": INDEX_PATH}
+    return {"status": "built" if all_chunks else "no_content", "notes": len(notes), "chunks": len(all_chunks), "path": INDEX_PATH}
 
 
 if __name__ == "__main__":

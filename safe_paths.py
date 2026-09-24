@@ -9,7 +9,47 @@ escapes it (including via symlinks) or that is not a markdown file.
 """
 import os
 import tempfile
+import threading
+import hashlib
+from contextlib import contextmanager
 from pathlib import Path
+
+_NOTE_LOCK = threading.RLock()
+
+
+class NoteConflict(RuntimeError):
+    """The note changed during a read/modify/write operation."""
+
+
+@contextmanager
+def note_lock(path):
+    """Serialize cooperating writers across threads/processes on this note."""
+    path = Path(path).resolve()
+    with _NOTE_LOCK:
+        lock_dir = path.parent / ".brain-locks"
+        lock_dir.mkdir(exist_ok=True)
+        with (lock_dir / (hashlib.sha256(str(path).encode()).hexdigest() + ".lock")).open("a") as handle:
+            try:
+                import fcntl
+            except ImportError:
+                fcntl = None
+            if fcntl:
+                fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl:
+                    fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def checked_write(path, expected, data):
+    """Detect external edits made while preparing a change. Caller holds note_lock.
+    External editors do not honor our lock; an OS-level compare-and-swap is not
+    available for ordinary files, so they should not edit during an active write.
+    """
+    if Path(path).read_bytes() != expected:
+        raise NoteConflict("The note changed while preparing this update; retry with the latest source.")
+    atomic_write_bytes(path, data)
 
 
 class PathOutsideVault(ValueError):
@@ -44,6 +84,8 @@ def is_scannable_md(rel_path: Path, *, include_entities: bool, brain_top_level_o
     .trash + livesync log noise.
     """
     parts = rel_path.parts
+    if parts and parts[0] == "Brain Workspace":
+        return False  # durable records are queried directly, never as fresh source evidence
     if brain_top_level_only:
         is_brain = bool(parts) and parts[0] == "_brain"
     else:

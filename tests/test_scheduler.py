@@ -27,6 +27,7 @@ def test_parse_hour_non_numeric_falls_back_to_default():
 
 
 def test_post_refresh_runs_truth_before_linker_when_enabled(monkeypatch):
+    monkeypatch.setenv("BRAIN_LEGACY_AUTOWRITE", "1")
     calls = []
     monkeypatch.setattr(mcp_server, "_run_script", lambda script, argv, label: calls.append(label))
     monkeypatch.setenv("BRAIN_TRUTH_ENABLED", "1")
@@ -49,6 +50,7 @@ def test_post_refresh_skips_truth_by_default(monkeypatch):
 
 
 def test_post_refresh_sweep_gated_and_runs_after_ledger(monkeypatch):
+    monkeypatch.setenv("BRAIN_LEGACY_AUTOWRITE", "1")
     calls = []
     monkeypatch.setattr(mcp_server, "_run_script", lambda script, argv, label: calls.append(label))
     monkeypatch.delenv("BRAIN_TRUTH_ENABLED", raising=False)
@@ -62,6 +64,16 @@ def test_post_refresh_sweep_gated_and_runs_after_ledger(monkeypatch):
     mcp_server._post_refresh_tasks()
     # after the ledger, so the ledger's own completions can't collide with it
     assert calls == ["linker", "ledger", "sweep"]
+
+
+def test_legacy_completion_writes_are_disabled_by_default(monkeypatch):
+    calls = []
+    monkeypatch.setattr(mcp_server, "_run_script", lambda script, argv, label: calls.append(label))
+    monkeypatch.delenv("BRAIN_LEGACY_AUTOWRITE", raising=False)
+    monkeypatch.setenv("BRAIN_LEDGER_ENABLED", "1")
+    monkeypatch.setenv("BRAIN_SWEEP_ENABLED", "1")
+    mcp_server._post_refresh_tasks()
+    assert "ledger" not in calls and "sweep" not in calls
 
 
 def test_parse_hour_fallback_hour_is_itself_usable():

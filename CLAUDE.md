@@ -12,10 +12,12 @@ at the top of the file or skill loading breaks.
 
 # Obsidian Brain
 
-A persistent, agent-native knowledge layer over an Obsidian vault. The vault's `.md` files are
-the source of truth — there is no separate database. The agent decides when to query; there are
-no user-facing commands. Embeddings are generated locally (LM Studio / llama-swap), so there is
-zero cloud/API cost or dependency.
+A director workspace and knowledge layer over an Obsidian vault. Original notes
+and `Brain Workspace/` record/history Markdown are authoritative. SQLite/FTS and
+FAISS are rebuildable projections. `/ui` provides daily attention, review and
+project/client/person briefs; the same records are exposed through MCP. Read
+[docs/director-workspace.md](docs/director-workspace.md) for the record and review
+contract. Model processing goes to the configured endpoints.
 
 There are **two distinct audiences** for this file:
 1. **Working on the code** — see "Development" and "Architecture" below.
@@ -52,7 +54,9 @@ cd deploy && docker compose up -d --build
 
 Prerequisites: Python 3.11+ and LM Studio reachable at `LM_BASE_URL`
 (default `http://localhost:1234/v1`) with the embedding model loaded. Without a running
-embedding endpoint, indexing and search fail.
+embedding endpoint, semantic indexing/search fail. Workspace intake, review and
+exact lookup remain available. Scheduled ledger/sweep writes default off and require
+`BRAIN_LEGACY_AUTOWRITE=1` in addition to their existing flags.
 
 ## Architecture
 
@@ -70,21 +74,16 @@ mcp_server.py FastMCP server exposing all of the above as tools (stdio or stream
 
 Things that span multiple files and are easy to get wrong:
 
-- **Where index data lives.** The index is written *inside the vault* at `_brain/index.faiss`
-  + `_brain/metadata.json` (`config.py`), and these index artifacts under `_brain/` are never
-  re-indexed. `scan_vault` and the task scanner otherwise apply divergent `_brain` policies
-  (see `safe_paths.is_scannable_md`): entity notes under `_brain/entities/` are indexed for
-  semantic search but not task-scanned. `_brain/` is gitignored by Obsidian LiveSync and
-  replicated separately from notes.
+- **Durable data vs cache.** Preserve `Brain Workspace/Records/*.md` and
+  `Brain Workspace/Sources.md`; `_brain/workspace.sqlite3` is rebuildable. Derived
+  records must never enter source intake. Task and semantic scans include entity
+  notes and use the common containment/exclusion policy.
 
-- **Concurrency model.** `indexer.INDEX_LOCK` (an `RLock`) is shared by `indexer` and
-  `searcher` for in-process readers; a cross-process `fcntl` lock (`_build_lock`) serializes
-  whole builds so a manual `consolidate.py`/`indexer.py --force` can't interleave its swap with
-  the scheduler's. The *heavy* work (scan + embed) runs outside `INDEX_LOCK`; only the brief
-  read (search) and the atomic file swap hold it. `build_index` writes `*.tmp` then `os.replace`s,
-  cleans up leftover `*.tmp` on the next build, and `search` guards `index.ntotal == len(chunks)`
-  (returning `[]` + a "rebuild needed" log on mismatch) so a crash between the two `os.replace`s
-  never yields wrong text. Preserve these invariants.
+- **Concurrency model.** Whole index builds are serialized before scanning.
+  Metadata atomically selects an immutable checksummed FAISS generation. Missing,
+  corrupt or unavailable retrieval is an explicit error in production entry points.
+  Workspace mutations serialize across threads/processes and require current record
+  versions. Cooperating source-note writers lock/check their read snapshots.
 
 - **Incremental rebuild.** `build_index(force=False)` compares a `vault_signature` (hash of the
   sorted set of relpaths + mtimes) so deletions/renames trigger a rebuild — not just `max(mtime)`.

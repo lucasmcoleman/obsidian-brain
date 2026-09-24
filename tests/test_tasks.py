@@ -57,18 +57,14 @@ def test_scan_skips_trash_and_livesync_logs(vault):
     assert texts == ["real live task"]
 
 
-def test_scan_skips_brain_dir_at_any_depth_including_entities(vault):
-    # Unlike indexer.scan_vault (which carves out _brain/entities/ so curated
-    # entity notes stay indexable, and only anchors the _brain exclusion at the
-    # vault top level), the task scanner treats ANY path containing a `_brain`
-    # component as non-knowledge, at any depth, with no entities carve-out.
-    # This pins that current (drifted) behavior exactly.
+def test_scan_matches_indexer_entity_inclusion(vault):
+    # Tasks created by the brain's entity writer must remain discoverable.
     write_note(vault, "live.md", "- [ ] real live task\n")
     write_note(vault, "_brain/entities/foo.md", "- [ ] entity note task\n")
     write_note(vault, "Projects/_brain/x.md", "- [ ] nested brain-dir task\n")
     open_tasks = tasks.scan_tasks("open", vault_path=str(vault))
     texts = [t["text"] for t in open_tasks]
-    assert texts == ["real live task"]
+    assert set(texts) == {"real live task", "entity note task", "nested brain-dir task"}
 
 
 def test_complete_refuses_to_edit_a_checkbox_inside_a_code_fence(vault):

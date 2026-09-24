@@ -10,12 +10,13 @@ from pathlib import Path
 
 from config import VAULT_PATH, ENTITIES_DIR, INDEX_PATH, METADATA_PATH
 from indexer import build_index
-from searcher import search, format_results
+from searcher import search, format_results, SearchUnavailable
 from safe_paths import (
     resolve_in_vault,
     PathOutsideVault,
     detect_newline,
     atomic_write_bytes,
+    note_lock, checked_write, NoteConflict,
 )
 
 
@@ -38,7 +39,10 @@ def query_brain(query: str, top_k: int = 5) -> str:
     if not os.path.exists(INDEX_PATH) or not os.path.exists(METADATA_PATH):
         return ("No index has been built yet. Run brain_build_index (or the CLI "
                 "`indexer.py --force`) before querying the brain.")
-    results = search(query, top_k=top_k)
+    try:
+        results = search(query, top_k=top_k, strict=True)
+    except SearchUnavailable as exc:
+        return f"Search unavailable: {exc}"
     return format_results(results, query)
 
 
@@ -98,6 +102,14 @@ def append_insight(note_path: str, insight: str, context: str = "") -> dict:
     if not target.exists():
         return {"status": "error", "detail": f"Note not found: {target}"}
 
+    try:
+        with note_lock(target):
+            return _append_insight_locked(target, insight, context)
+    except NoteConflict as exc:
+        return {"status": "error", "detail": str(exc)}
+
+
+def _append_insight_locked(target, insight, context):
     raw = target.read_bytes()
     existing = raw.decode("utf-8")
     nl = detect_newline(raw)
@@ -113,7 +125,7 @@ def append_insight(note_path: str, insight: str, context: str = "") -> dict:
     lines += [insight, "", "> _Recorded by Obsidian Brain_"]
     section = nl.join(lines)
 
-    atomic_write_bytes(target, (existing + section).encode("utf-8"))
+    checked_write(target, raw, (existing + section).encode("utf-8"))
     return {"status": "ok", "path": str(target), "detail": f"Appended insight to {target}"}
 
 

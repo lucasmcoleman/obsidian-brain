@@ -17,13 +17,21 @@ def test_ui_page_is_public_and_html(monkeypatch):
     assert r.status_code == 200
     assert "text/html" in r.headers["content-type"]
     assert "Obsidian Brain" in r.text
-    assert "brain_token" in r.text  # the client-side token flow is present
+    assert "/ui/app.js" in r.text
+    assert "brain_token" in _client(monkeypatch, token="tok").get("/ui/app.js").text
 
 
 def test_ui_api_requires_token_when_set(monkeypatch):
     c = _client(monkeypatch, token="tok")
     assert c.get("/ui/api/status").status_code == 401
     assert c.get("/ui/api/status", headers={"Authorization": "Bearer tok"}).status_code == 200
+
+
+def test_browser_favicon_is_public_without_exposing_vault_data(monkeypatch):
+    client = _client(monkeypatch, token="tok")
+    result = client.get("/favicon.ico")
+    assert result.status_code == 204 and not result.content
+    assert client.get("/ui/api/workspace").status_code == 401
 
 
 def test_ui_insight_refuses_without_configured_token(monkeypatch):
@@ -37,7 +45,7 @@ def test_ui_page_has_insight_form_hooks(monkeypatch):
     # The append-insight affordance lives on the search-result cards: the page
     # must ship JS that posts to /ui/api/insight (this pins the endpoint to a
     # UI caller, so it can't go orphan again).
-    r = _client(monkeypatch, token="tok").get("/ui")
+    r = _client(monkeypatch, token="tok").get("/ui/legacy")
     assert "/ui/api/insight" in r.text
     assert "＋ Insight" in r.text  # the per-result toggle button label
 

@@ -18,6 +18,7 @@ from safe_paths import (
     detect_newline,
     atomic_write_bytes,
     is_scannable_md,
+    note_lock, checked_write, NoteConflict,
 )
 
 # A markdown task line: optional indent, bullet (- * +), [ ]/[x]/[X], then text.
@@ -61,7 +62,11 @@ def _iter_md_files(vault: Path):
     # checkboxes as phantom open tasks.
     for md in vault.rglob("*.md"):
         rel = md.relative_to(vault)
-        if not is_scannable_md(rel, include_entities=False, brain_top_level_only=False):
+        if not is_scannable_md(rel, include_entities=True, brain_top_level_only=True):
+            continue
+        try:
+            resolve_in_vault(str(md), str(vault))
+        except PathOutsideVault:
             continue
         yield md
 
@@ -130,6 +135,14 @@ def complete_task(
     if not p.exists():
         return {"status": "error", "error": f"Note not found: {p}"}
 
+    try:
+        with note_lock(p):
+            return _complete_task_locked(p, vault, match, completion_date)
+    except NoteConflict as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+def _complete_task_locked(p, vault, match, completion_date):
     needle = match.strip().lower()
     raw = p.read_bytes()
     nl = detect_newline(raw)
@@ -162,7 +175,7 @@ def complete_task(
         new_line = new_line.rstrip() + f" ✅ {cdate}"
     lines[i] = new_line
     # Rejoin with the original newline (round-trips exactly) and write atomically.
-    atomic_write_bytes(p, nl.join(lines).encode("utf-8"))
+    checked_write(p, raw, nl.join(lines).encode("utf-8"))
 
     rel = str(p.relative_to(vault)) if str(p).startswith(str(vault)) else str(p)
     return {"status": "completed", "note_path": rel, "line": i + 1,

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Your projects, commitments, decisions and source evidence in one daily workspace.">
+  <title>Obsidian Brain · Workspace</title>
+  <link rel="stylesheet" href="/ui/style.css"><script src="/ui/app.js" defer></script>
+</head>
+<body>
+  <aside class="rail">
+    <a class="brand" href="#today"><span class="brand-mark">B</span><span>Obsidian<br><strong>Brain</strong></span></a>
+    <p class="rail-label">WORKSPACE</p>
+    <nav aria-label="Workspace">
+      <button data-view="today" class="active"><span>◉</span> Today <b id="attention-count"></b></button>
+      <button data-view="work"><span>☑</span> All work</button>
+      <button data-view="projects"><span>▤</span> Projects</button>
+      <button data-view="clients"><span>◎</span> Clients</button>
+      <button data-view="people"><span>♧</span> People</button>
+      <button data-view="review"><span>☷</span> Review <b id="review-count"></b></button>
+      <button data-view="decisions"><span>◇</span> Decisions</button>
+      <button data-view="search"><span>⌕</span> Sources & search</button>
+    </nav>
+    <div class="rail-bottom"><a href="/ui/legacy">Tasks & service status ↗</a><button id="account">Connection settings</button><span class="small">Local vault · Private workspace</span></div>
+  </aside>
+  <main id="main">
+    <header class="topbar"><span id="today-date"></span><div><button id="sync" class="secondary">↻ Scan sources</button><button id="new" class="primary">＋ New record</button></div></header>
+    <div id="notice" role="status" aria-live="polite"></div>
+    <section id="content" aria-busy="true"><div class="loading">Connecting to your workspace…</div></section>
+  </main>
+  <dialog id="connection" aria-labelledby="connection-title">
+    <form id="connect-form"><div class="dialog-header"><h2 id="connection-title">Connect to your brain</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div>
+      <p>Use the access token from your Obsidian Brain plugin settings. You can paste the token or its Authorization: Bearer header. It stays in this browser tab when browser storage is available.</p>
+      <label>Access token<input id="token" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="connect-error" required></label>
+      <p class="error" id="connect-error" role="alert"></p><button class="primary" type="submit">Connect</button>
+    </form>
+  </dialog>
+  <dialog id="editor" aria-labelledby="editor-title"><form id="record-form">
+    <div class="dialog-header"><h2 id="editor-title">Review record</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div>
+    <div id="editor-evidence"></div>
+    <label id="kind-label">Record type<select name="kind"><option value="commitment">Commitment</option><option value="project">Project</option><option value="client">Client</option><option value="person">Person</option><option value="decision">Decision</option><option value="issue">Issue / blocker</option></select></label>
+    <label>Title<textarea name="title" rows="2" required maxlength="1000"></textarea></label>
+    <div class="form-grid"><label>Project<select name="project"></select></label><label>Client<input name="client" maxlength="200" placeholder="Unconfirmed"></label><label>Owner<input name="owner" maxlength="200" placeholder="Unconfirmed"></label><label>Due date<input name="due" type="date"></label></div>
+    <label>Status<select name="status"><option value="open">Open</option><option value="waiting">Waiting on someone</option><option value="blocked">Blocked</option><option value="done">Done / decided</option><option value="cancelled">Cancelled</option><option value="active">Active</option><option value="archived">Archived</option></select></label>
+    <label>Notes / next step<textarea name="note" rows="3" maxlength="4000"></textarea></label>
+    <p class="error" id="record-error" role="alert"></p><div class="dialog-actions"><button type="button" class="secondary" data-close>Cancel</button><button type="submit" class="primary" id="save-record">Accept record</button></div>
+  </form></dialog>
+  <dialog id="source-panel" class="source-dialog" aria-labelledby="source-title"><div class="dialog-header"><div><p class="eyebrow">SOURCE EVIDENCE</p><h2 id="source-title">Source</h2></div><button type="button" class="icon" data-close aria-label="Close source">×</button></div><div id="source-meta"></div><div id="source-body"></div></dialog>
+  <dialog id="defer-dialog" aria-labelledby="defer-title"><form id="defer-form"><div class="dialog-header"><h2 id="defer-title">Review this later</h2><button type="button" class="icon" data-close aria-label="Close">×</button></div><p>This changes the reminder, not the commitment.</p><label>Review date<input name="until" type="date" required></label><p id="defer-error" class="error" role="alert"></p><button class="primary">Defer reminder</button></form></dialog>
+  <template id="empty"><div class="empty"><span class="empty-mark">◇</span><h2></h2><p></p></div></template>
+</body></html>

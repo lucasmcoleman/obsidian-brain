@@ -1,7 +1,6 @@
 ---
 name: obsidian-brain-usage
-description: "Obsidian Brain — a persistent knowledge layer over the user's Obsidian vault. Invoke automatically (no special commands) whenever vault context could improve an answer, or when something worth remembering emerges. Backed by an MCP server exposing semantic search + write-back. (Consuming-agent skill; the CLAUDE.md dev skill is named `obsidian-brain` — distinct names avoid a manifest collision.)"
-platforms: [linux, macos, windows]
+description: "Use the Obsidian Brain MCP server for the user's projects, clients, people, commitments, decisions and source notes. Provides accepted attention records, evidence review, exact/semantic lookup and authorized write-back. Unrelated general knowledge does not need this skill."
 ---
 
 # Obsidian Brain
@@ -15,8 +14,33 @@ when you learn something worth keeping, reach for the brain's MCP tools.
 The brain runs as an MCP server (`obsidian-brain`) and is reached through MCP tools —
 the same tools whether you're a local agent (stdio) or a remote one (streamable-HTTP
 container, e.g. at `<host>:8053/mcp`). The vault lives wherever `OBSIDIAN_VAULT_PATH`
-points (often mounted as `/vault` in containers); all brain-generated notes live under
-`_brain/` (entities in `_brain/entities/`).
+points (often mounted as `/vault` in containers). Durable director records and
+history live under `Brain Workspace/`; older entity notes live in `_brain/entities/`.
+
+## Daily attention and review
+
+For "what needs my attention?", start with `brain_attention`. It returns accepted
+commitments and decisions with reasons and coverage. An empty attention list with
+pending or stale sources is not evidence that all work is clear.
+
+- `brain_records(kind, review)` and `brain_brief(record_id)` show accepted and
+  pending project/client/person context. `brain_source` opens supporting evidence.
+- `brain_workspace_sync` reads eligible sources into pending observations without
+  changing source notes. Historical checkbox dates are not automatically current.
+- `brain_lookup(query)` finds exact project numbers and terms without embeddings.
+- `brain_extract_meeting(note_path)` starts a background extraction job;
+  `brain_extraction_status(job_id)` reports progress/failure. Results stay pending.
+- `brain_review(record_id, action, version, fields)` applies authorized changes.
+  Accept only what the user confirms. Keep unknown owners/dates null. Acknowledge
+  and defer affect reminders; resolve records a confirmed outcome. Changed evidence
+  can be accepted with `accept_changes`, or the accepted position explicitly
+  retained with `keep_current`. Stale versions require a reload.
+- `brain_record_create(kind, title, fields)` records user-confirmed information.
+
+Preserve source quotations, original event dates, review state and uncertainty.
+Do not silently merge similarly worded work from different projects or turn a
+model's interpretation into accepted facts. See
+[the workspace guide](docs/director-workspace.md) for storage and API details.
 
 ## When to invoke
 
@@ -54,7 +78,8 @@ user's personal context, or things clearly answerable from the current conversat
 
 Tasks are Obsidian checkboxes (`- [ ]` open, `- [x]` done) scattered across notes.
 `brain_query` (semantic) finds *relevant* notes; `brain_tasks` finds *every* task
-precisely. When the user asks what's on their plate, call `brain_tasks("open")`. When they
+precisely. For the current accepted position use `brain_attention`; use
+`brain_tasks("open")` when the user wants original source checkboxes. When they
 say a task is finished, call `brain_complete_task` (confirm the exact task first if
 ambiguous).
 
@@ -78,8 +103,8 @@ an existing note over creating new files.
 
 ## Pitfalls
 
-- Embeddings come from a local OpenAI-compatible endpoint (`LM_BASE_URL`, default
-  `http://localhost:1234/v1`). If it's down, retrieval fails gracefully (empty results) —
-  say so rather than guessing.
+- Embeddings use the configured OpenAI-compatible endpoint (`LM_BASE_URL`). If
+  unavailable, production retrieval reports an error; do not describe it as zero
+  matches. Exact lookup, intake and record review do not require embeddings.
 - Don't call `brain_query` on every message. Use judgment; when unsure, ask first.
 - The index is rebuilt nightly by a consolidation job — no manual action needed normally.

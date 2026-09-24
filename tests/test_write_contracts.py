@@ -50,7 +50,8 @@ def test_complete_task_leaves_no_tmp_file(vault):
     p = vault / "t.md"
     p.write_text("- [ ] do it\n", encoding="utf-8")
     tasks.complete_task("t.md", "do it", vault_path=str(vault))
-    assert [f.name for f in vault.iterdir()] == ["t.md"]  # no leftover .tmp
+    assert [f.name for f in vault.iterdir() if f.is_file()] == ["t.md"]
+    assert not list(vault.rglob("*.tmp"))  # persistent coordination locks are intentional
 
 
 # ── M15 + L11: entity created-vs-exists + robust slug ──────────────────────────

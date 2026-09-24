@@ -53,7 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp.server.fastmcp import FastMCP
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response, RedirectResponse
 
 import oauth
 from brain import (
@@ -62,7 +62,7 @@ from brain import (
     append_insight,
     build_index,
 )
-from searcher import search as _search_notes
+from searcher import search as _search_notes, SearchUnavailable
 from tasks import scan_tasks, complete_task, count_tasks, format_tasks
 from config import (
     VAULT_PATH,
@@ -110,6 +110,9 @@ mcp = FastMCP(
     stateless_http=os.environ.get("BRAIN_STATELESS_HTTP", "1").strip().lower()
     in ("1", "true", "yes", "on"),
 )
+
+from workspace_api import register_workspace
+director_workspace = register_workspace(mcp, VAULT_PATH)
 
 
 @mcp.tool()
@@ -469,7 +472,37 @@ loadStatus();
 
 @mcp.custom_route("/ui", methods=["GET"])
 async def ui_page(_request: Request) -> HTMLResponse:
+    return HTMLResponse((Path(__file__).parent / "web" / "index.html").read_text(),
+                        headers={"Cache-Control": "no-store"})
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def home_page(_request: Request):
+    return RedirectResponse("/ui")
+
+
+@mcp.custom_route("/favicon.ico", methods=["GET"])
+async def favicon(_request: Request):
+    # Browsers request this before login. It contains no private data and must
+    # not contribute an authentication failure to the reverse proxy's ban count.
+    return Response(status_code=204, headers={"Cache-Control": "public, max-age=86400"})
+
+
+@mcp.custom_route("/ui/legacy", methods=["GET"])
+async def legacy_page(_request: Request) -> HTMLResponse:
     return HTMLResponse(_UI_HTML)
+
+
+@mcp.custom_route("/ui/app.js", methods=["GET"])
+async def ui_script(_request: Request):
+    return Response((Path(__file__).parent / "web" / "app.js").read_text(), media_type="text/javascript",
+                    headers={"Cache-Control": "no-cache"})
+
+
+@mcp.custom_route("/ui/style.css", methods=["GET"])
+async def ui_style(_request: Request):
+    return Response((Path(__file__).parent / "web" / "style.css").read_text(), media_type="text/css",
+                    headers={"Cache-Control": "no-cache"})
 
 
 @mcp.custom_route("/ui/api/search", methods=["GET"])
@@ -481,7 +514,10 @@ async def ui_search(request: Request) -> JSONResponse:
         k = int(request.query_params.get("k", "5"))
     except (TypeError, ValueError):
         k = 5
-    results = await run_in_threadpool(_search_notes, q, k)
+    try:
+        results = await run_in_threadpool(_search_notes, q, k, strict=True)
+    except SearchUnavailable as exc:
+        return JSONResponse({"state": "unavailable", "detail": str(exc)}, status_code=503)
     return JSONResponse({"results": results})
 
 
@@ -513,7 +549,10 @@ def _writes_enabled_or_503() -> JSONResponse | None:
 
 async def _parse_json_body(request: Request) -> tuple[dict | None, JSONResponse | None]:
     try:
-        return await request.json(), None
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("object required")
+        return body, None
     except Exception:
         return None, JSONResponse({"status": "error", "detail": "invalid JSON"}, status_code=400)
 
@@ -640,7 +679,7 @@ def _build_http_app():
         # @mcp.custom_route decorators above.
         app.add_middleware(
             BearerAuthMiddleware, token=token,
-            public_paths={"/health", "/ui"} | _OAUTH_PUBLIC_PATHS)
+            public_paths={"/health", "/", "/favicon.ico", "/ui", "/ui/legacy", "/ui/app.js", "/ui/style.css"} | _OAUTH_PUBLIC_PATHS)
         print("[auth] bearer-token auth enabled on HTTP transport", flush=True)
     else:
         print("[auth] WARNING: BRAIN_AUTH_TOKEN unset — HTTP tools are UNAUTHENTICATED; "
@@ -697,6 +736,11 @@ def _seconds_until_hour(hour: int) -> float:
 
 
 def _refresh_once(force: bool) -> None:
+    try:
+        coverage = director_workspace.sync()
+        print(f"[workspace] {coverage['sources']} sources; {coverage['created']} pending observations", flush=True)
+    except Exception as e:
+        print(f"[workspace] source scan failed: {e}", flush=True)
     try:
         result = build_index(force=force)
         print(f"[refresh] {datetime.now().isoformat(timespec='seconds')} {result}", flush=True)
@@ -756,19 +800,22 @@ def _post_refresh_tasks() -> None:
             "--endpoint", chat_url, "--model", chat_model,
             "--embed-endpoint", lm, "--embed-model", embed_model,
         ], "linker")
-    if _truthy("BRAIN_LEDGER_ENABLED", "1"):
+    legacy_writes = _truthy("BRAIN_LEGACY_AUTOWRITE", "0")
+    if _truthy("BRAIN_LEDGER_ENABLED", "1") and legacy_writes:
         _run_script("ledger_update.py", [
             "--apply", "--vault", vault, "--endpoint", ledger_url, "--model", ledger_model,
         ], "ledger")
     # Vault-wide completion sweep: checks off ANY open checkbox (dailies,
     # dictation follow-ups) that a recent note explicitly says is done — the
     # ledger itself is excluded above's job. Same model tier as the ledger.
-    if _truthy("BRAIN_SWEEP_ENABLED", "0"):
+    if _truthy("BRAIN_SWEEP_ENABLED", "0") and legacy_writes:
         sweep_url = os.environ.get("SWEEP_CHAT_URL", ledger_url)
         sweep_model = os.environ.get("SWEEP_CHAT_MODEL", ledger_model)
         _run_script("task_sweep.py", [
             "--apply", "--vault", vault, "--endpoint", sweep_url, "--model", sweep_model,
         ], "sweep")
+    if not legacy_writes:
+        print("[workspace] legacy automatic ledger/sweep writes disabled; observations require review", flush=True)
 
 
 def _refresh_loop(hour: int, force: bool, on_start: bool) -> None:
