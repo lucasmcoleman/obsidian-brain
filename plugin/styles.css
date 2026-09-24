@@ -76,3 +76,8 @@
 .brain-status-bad {
 	color: var(--text-error, #e5534b);
 }
+.brain-trust {
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	margin: 0.25rem 0;
+}

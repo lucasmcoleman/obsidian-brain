@@ -1,6 +1,7 @@
 import { App, Editor, Modal } from "obsidian";
 import type BrainPlugin from "../main";
 import type { SearchResult } from "./api";
+import { trustLabel } from "./api";
 import { openVaultNote } from "./vaultNav";
 
 /**
@@ -13,6 +14,7 @@ export class AskBrainModal extends Modal {
 	private readonly targetEditor: Editor | null;
 	private inputEl!: HTMLInputElement;
 	private resultsEl!: HTMLElement;
+	private queryToken = 0;
 
 	constructor(app: App, plugin: BrainPlugin, targetEditor: Editor | null) {
 		super(app);
@@ -44,18 +46,22 @@ export class AskBrainModal extends Modal {
 	}
 
 	onClose(): void {
+		this.queryToken++;
 		this.contentEl.empty();
 	}
 
 	private async runQuery(): Promise<void> {
+		const token = ++this.queryToken;
 		const q = this.inputEl.value.trim();
 		if (!q) return;
 		this.resultsEl.empty();
 		this.resultsEl.createEl("p", { text: "Searching…", cls: "brain-muted" });
 		try {
 			const results = await this.plugin.brainClient.search(q, this.plugin.settings.topK);
+			if (token !== this.queryToken) return;
 			this.renderResults(results);
 		} catch (e) {
+			if (token !== this.queryToken) return;
 			this.resultsEl.empty();
 			this.resultsEl.createEl("p", {
 				text: e instanceof Error ? e.message : String(e),
@@ -76,6 +82,7 @@ export class AskBrainModal extends Modal {
 			const link = header.createEl("a", { text: r.note_path, cls: "brain-result-link" });
 			link.href = "#";
 			header.createEl("span", { text: r.score.toFixed(3), cls: "brain-score" });
+			item.createEl("div", { text: trustLabel(r), cls: "brain-trust" });
 			item.createEl("div", { text: (r.text || "").slice(0, 240), cls: "brain-snippet" });
 			link.addEventListener("click", (evt) => {
 				evt.preventDefault();
@@ -85,9 +92,9 @@ export class AskBrainModal extends Modal {
 	}
 
 	private chooseResult(notePath: string): void {
-		const basename = (notePath.split("/").pop() ?? notePath).replace(/\.md$/i, "");
+		const target = notePath.replace(/\.md$/i, "");
 		if (this.targetEditor) {
-			this.targetEditor.replaceSelection(`[[${basename}]]`);
+			this.targetEditor.replaceSelection(`[[${target}]]`);
 			this.close();
 			return;
 		}

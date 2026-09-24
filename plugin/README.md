@@ -1,11 +1,19 @@
 # Obsidian Brain (companion plugin)
 
+The source under this repository's `plugin/` directory is canonical. The sibling
+`obsidian-brain-plugin` repository is a distribution mirror; synchronize tested
+source and built assets together when preparing a release.
+
+The **Open director workspace** command opens the server's `/ui` in a browser.
+Enter the access token in that browser tab; it is never put in the URL. Search and
+related results show source review status, and inserted links retain folder paths.
+
 A thin Obsidian client for the [obsidian-brain](../README.md) semantic search server. It
 leans into the one thing a browser tab can't do: **query the brain using the active note as
 live context.**
 
 - **Related notes panel** — a side panel (right leaf) that re-queries the brain against the
-  note you're currently looking at (even unsaved text), debounced on every note switch.
+  saved note you're currently looking at, debounced on every note switch.
   Read-only: it never writes into your notes. This complements, not duplicates, the nightly
   `moc_linker` `## Related Notes` block — that one is the durable, offline artifact; this
   panel is the live lens, and it also covers brand-new notes the nightly job hasn't seen yet.

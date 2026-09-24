@@ -40,6 +40,19 @@ export default class BrainPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "open-director-workspace",
+			name: "Open director workspace",
+			callback: () => {
+				try {
+					const base = this.settings.baseUrl.trim().replace(/\/+$/, "");
+					const url = new URL(`${base}/ui`);
+					if (!["http:", "https:"].includes(url.protocol)) throw new Error("Use an HTTP or HTTPS server URL.");
+					window.open(url.href, "_blank", "noopener,noreferrer");
+				} catch (error) { new Notice(error instanceof Error ? error.message : "Check the brain server URL."); }
+			},
+		});
+
+		this.addCommand({
 			id: "refresh-brain-index",
 			name: "Refresh brain index",
 			callback: () => void this.refreshIndex(),

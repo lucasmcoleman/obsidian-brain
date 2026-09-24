@@ -7,6 +7,17 @@ export interface SearchResult {
 	note_path: string;
 	abs_path: string;
 	score: number;
+	review_status?: string;
+	source_type?: string;
+	superseded_by?: string;
+}
+
+export function trustLabel(result: SearchResult): string {
+	if (result.review_status === "superseded") return `Superseded${result.superseded_by ? ` → ${result.superseded_by}` : " — verify source"}`;
+	if (result.review_status === "contested") return "Contested — verify source";
+	if (result.review_status === "unreviewed") return `Unreviewed ${result.source_type || "source"}`;
+	if (result.review_status === "reviewed") return "Marked reviewed";
+	return "Review status unknown";
 }
 
 interface SearchResponse {
@@ -62,6 +73,7 @@ export class BrainClient {
 			);
 		}
 		if (res.status < 200 || res.status >= 300) {
+			if (res.status === 503) throw new BrainApiError("Brain search is unavailable. Check the index and model service, then retry.", 503);
 			throw new BrainApiError(`Brain server returned HTTP ${res.status}.`, res.status);
 		}
 		try {

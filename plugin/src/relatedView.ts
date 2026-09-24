@@ -1,6 +1,7 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import type BrainPlugin from "../main";
 import type { SearchResult } from "./api";
+import { trustLabel } from "./api";
 import { openVaultNote } from "./vaultNav";
 
 export const RELATED_VIEW_TYPE = "brain-related-view";
@@ -43,6 +44,7 @@ export class RelatedNotesView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.queryToken++;
 		if (this.debounceTimer !== null) {
 			window.clearTimeout(this.debounceTimer);
 			this.debounceTimer = null;
@@ -51,11 +53,12 @@ export class RelatedNotesView extends ItemView {
 
 	/** Called by the plugin on active-leaf-change / file-open (already debounced by caller intent). */
 	scheduleQuery(overrideMs?: number): void {
+		const token = ++this.queryToken;
 		if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
 		const ms = overrideMs ?? this.plugin.settings.debounceMs;
 		this.debounceTimer = window.setTimeout(() => {
 			this.debounceTimer = null;
-			void this.runQuery();
+			void this.runQuery(token);
 		}, Math.max(0, ms));
 	}
 
@@ -69,8 +72,7 @@ export class RelatedNotesView extends ItemView {
 		container.createEl("p", { text, cls });
 	}
 
-	private async runQuery(): Promise<void> {
-		const token = ++this.queryToken;
+	private async runQuery(token: number): Promise<void> {
 
 		if (!this.plugin.settings.autoRelated) {
 			this.setStatus("Auto-related is off (see Obsidian Brain settings).", "brain-muted");
@@ -93,6 +95,7 @@ export class RelatedNotesView extends ItemView {
 		} catch {
 			text = "";
 		}
+		if (token !== this.queryToken) return;
 		// Title + first ~1500 chars, per the shared /ui/api/search contract.
 		const query = `${file.basename}\n\n${text}`.slice(0, 1500);
 
@@ -125,6 +128,7 @@ export class RelatedNotesView extends ItemView {
 				void openVaultNote(this.app, r.note_path);
 			});
 			header.createEl("span", { text: r.score.toFixed(3), cls: "brain-score" });
+			item.createEl("div", { text: trustLabel(r), cls: "brain-trust" });
 			item.createEl("div", { text: (r.text || "").slice(0, 220), cls: "brain-snippet" });
 		}
 	}
